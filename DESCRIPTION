@@ -1,8 +1,8 @@
 Package: gamstransfer
 Type: Package
 Title: A Data Interface Between 'GAMS' and R
-Version: 3.0.1
-Date: 2024-03-26
+Version: 3.0.2
+Date: 2024-04-03
 Authors@R: c(
     person("Atharv", "Bhosekar", email = "abhosekar@gams.com",
         role = c("aut", "cre")),
@@ -35,9 +35,9 @@ Collate: 'Alias.R' 'BaseAlias.R' 'Container.R' 'DomainViolation.R'
         'Set.R' 'Super.R' 'Symbol.R' 'UniverseAlias.R' 'Variable.R'
         'gamstransfer-package.R' 'symbolTypes.R' 'utility.R'
 NeedsCompilation: yes
-Packaged: 2024-03-27 11:24:25 UTC; abhosekar
+Packaged: 2024-04-04 18:28:13 UTC; abhosekar
 Author: Atharv Bhosekar [aut, cre],
   GAMS Development Corp. [cph, fnd],
   GAMS Software GmbH [cph, fnd]
 Repository: CRAN
-Date/Publication: 2024-03-28 16:00:10 UTC
+Date/Publication: 2024-04-05 07:43:03 UTC
