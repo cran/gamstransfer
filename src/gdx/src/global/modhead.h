@@ -27,6 +27,8 @@
 
 #include <fstream>
 
+#ifdef __IN_CPPMEX__
+
 #ifndef STUBWARN
 #define STUBWARN()                                                                                                                                                       \
    if( global::modhead::stubofs.is_open() )                                                                                                                              \
@@ -40,7 +42,26 @@
    global::modhead::stubofs.flush();
 #endif
 
+#else
+   #ifndef STUBWARN
+   #define STUBWARN() ;
+   #define STUBWARN_MSG(msg) ;
+   #endif
+#endif
+
 namespace global::modhead
 {
+#if defined( __IN_CPPMEX__ )
+class SWStream final : public std::ofstream
+{
+   std::streampos start;
+   const std::string fn { "stubwarnings.txt" };
+public:
+   SWStream();
+   ~SWStream() override;
+};
+extern SWStream stubofs;
+#else
 extern std::ofstream stubofs;
+#endif
 }
