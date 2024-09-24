@@ -56,7 +56,7 @@ class TStdThread : public std::thread
 {
 public:
    explicit TStdThread(const std::function<void()> &execute);
-   virtual ~TStdThread();
+   ~TStdThread();
    [[nodiscard]] uint64_t getThreadHash() const;
 };
 
@@ -71,5 +71,9 @@ public:
    void wait(std::mutex &mx ) const;
    bool timedWaitAbs(std::mutex &mx, int64_t absTime ) const;
 };
+
+int64_t nowCV();
+void incCVTimeMillis( int64_t &cvt, uint32_t ticks );
+void decCVTimeMillis( int64_t &cvt, uint32_t ticks );
 
 }

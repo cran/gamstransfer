@@ -886,7 +886,6 @@ int TGXFileObj::PrepareSymbolRead( const std::string_view Caller, int SyNr, cons
    if( utils::in( fmode, fr_str_data, fr_map_data, fr_mapr_data, fr_raw_data ) )
       gdxDataReadDone();// NOTE: Not covered by unit tests yet.
    NrMappedAdded = 0;
-   TIntegerMapping ExpndList;
    ErrorList = nullptr;
    CurSyPtr = nullptr;
    SortList = nullptr;
@@ -1014,6 +1013,7 @@ int TGXFileObj::PrepareSymbolRead( const std::string_view Caller, int SyNr, cons
       {
          try
          {
+            TIntegerMapping ExpndList;
             SortList = std::make_unique<LinkedDataType>( FCurrentDim, static_cast<int>( DataSize * sizeof( double ) ) );
             int FIDim = FCurrentDim;// First invalid dimension
             TgdxValues Avals;
@@ -1296,25 +1296,29 @@ bool TGXFileObj::DoWrite( const int *AElements, const double *AVals )
       }
       if( FDim == FCurrentDim && delta <= DeltaForWrite )
       {// small change in last dimension
-         FFile->WriteByte( FCurrentDim + delta );
+         assert(FCurrentDim >= 0 && FCurrentDim <= 255);
+         FFile->WriteByte( utils::ui8(FCurrentDim + delta) );
          LastElem[FCurrentDim - 1] = AElements[FCurrentDim - 1];
       }
       else
       {// general change
-         FFile->WriteByte( FDim );
+         assert(FDim >= 0 && FDim <= 255);
+         FFile->WriteByte( static_cast<uint8_t>(FDim) );
          for( int D { FDim - 1 }; D < FCurrentDim; D++ )
          {
-            int v { AElements[D] - MinElem[D] };
+            const int v { AElements[D] - MinElem[D] };
             switch( ElemType[D] )
             {
                case TgdxElemSize::sz_integer:
                   FFile->WriteInteger( v );
                   break;
                case TgdxElemSize::sz_word:
-                  FFile->WriteWord( v );
+                  assert(v >= 0 && v <= 65535);
+                  FFile->WriteWord( static_cast<uint16_t>(v) );
                   break;
                case TgdxElemSize::sz_byte:
-                  FFile->WriteByte( v );
+                  assert(v >= 0 && v <= 255);
+                  FFile->WriteByte( static_cast<uint8_t>(v) );
                   break;
             }
             LastElem[D] = AElements[D];
@@ -1325,10 +1329,10 @@ bool TGXFileObj::DoWrite( const int *AElements, const double *AVals )
    {
       for( int DV {}; DV <= LastDataField; DV++ )
       {
-         double X { AVals[DV] };
+         const double X { AVals[DV] };
          int64_t i64;
-         TDblClass dClass { dblInfo( X, i64 ) };
-         int xv { vm_valund };
+         const TDblClass dClass { dblInfo( X, i64 ) };
+         uint8_t xv { vm_valund };
          for( ; xv < vm_normal; xv++ )
             if( i64 == intlValueMapI64[xv] ) break;
          if( xv == vm_normal )
@@ -1360,7 +1364,7 @@ bool TGXFileObj::DoWrite( const int *AElements, const double *AVals )
          {
             FFile->WriteDouble( X );
             if( X >= Zvalacr )
-               AcronymList->CheckEntry( static_cast<int>( std::round( X / Zvalacr ) ) );
+               AcronymList->CheckEntry( utils::round<int>( X / Zvalacr ) );
          }
       }
       if( verboseTrace && TraceLevel >= TraceLevels::trl_all )
@@ -1454,9 +1458,9 @@ bool TGXFileObj::DoRead( double *AVals, int &AFDim )
       if( MapSetText && AVals[GMS_VAL_LEVEL] != 0.0 && CurSyPtr->SDataType == dt_set )
       {// remap settext number
          // NOTE: Not covered by unit tests yet.
-         double X { AVals[GMS_VAL_LEVEL] };
-         int D { static_cast<int>( std::round( X ) ) };
-         if( std::abs( X - D ) < 1e-12 && D >= 0 && D <= SetTextList->GetCapacity() )
+         const double X { AVals[GMS_VAL_LEVEL] };
+         if( const int D { ( utils::round<int>( X ) ) };
+            std::abs( X - D ) < 1e-12 && D >= 0 && D <= SetTextList->GetCapacity() )
             AVals[GMS_VAL_LEVEL] = MapSetText[D];
       }
       if( verboseTrace && TraceLevel >= TraceLevels::trl_all )
@@ -1471,10 +1475,9 @@ double TGXFileObj::AcronymRemap( double V )
       if(MapAcrToNaN)
          return intlValueMapDbl[GMS_SVIDX_NA];
 
-      int orgIndx { static_cast<int>( std::round( v / Zvalacr ) ) },
-              N { AcronymList->FindEntry( orgIndx ) },
-              newIndx {};
-      if( N < 0 )
+      const int orgIndx { ( utils::round<int>( v / Zvalacr ) ) };
+      int newIndx {};
+      if( int N { AcronymList->FindEntry( orgIndx ) }; N < 0 )
       {// not found
          // NOTE: Not covered by unit tests yet.
          if( NextAutoAcronym <= 0 ) newIndx = orgIndx;
@@ -1505,14 +1508,11 @@ double TGXFileObj::AcronymRemap( double V )
 
    if( V < Zvalacr )
       return V;// NOTE: Not covered by unit tests yet.
-   else
-   {
-      if( V == 0.0 ) return 0.0;
-      if( std::isnan( V ) ) return intlValueMapDbl[vm_valna];
-      if( std::isinf( V ) ) return V < 0.0 ? intlValueMapDbl[vm_valmin] : intlValueMapDbl[vm_valpin];
-      if( std::isnormal( V ) ) return V < 0.0 ? V : GetAsAcronym( V );
-      return intlValueMapDbl[vm_valna];// NOTE: Not covered by unit tests yet.
-   }
+   if( V == 0.0 ) return 0.0;
+   if( std::isnan( V ) ) return intlValueMapDbl[vm_valna];
+   if( std::isinf( V ) ) return V < 0.0 ? intlValueMapDbl[vm_valmin] : intlValueMapDbl[vm_valpin];
+   if( std::isnormal( V ) ) return V < 0.0 ? V : GetAsAcronym( V );
+   return intlValueMapDbl[vm_valna];// NOTE: Not covered by unit tests yet.
 }
 
 void TGXFileObj::AddToErrorListDomErrs( const std::array<int, GLOBAL_MAX_INDEX_DIM> &AElements, const double *AVals )
@@ -1526,8 +1526,7 @@ void TGXFileObj::AddToErrorListDomErrs( const std::array<int, GLOBAL_MAX_INDEX_D
 
    for( int D {}; D < FCurrentDim; D++ )
    {
-      int EN { AElements[D] };
-      if( EN < 0 )
+      if( const int EN { AElements[D] }; EN < 0 )
       {
          bool Found {};
          for( int i {}; i < ErrorList->GetCount(); i++ )
@@ -1558,7 +1557,7 @@ void TGXFileObj::AddToErrorList( const int *AElements, const double *AVals )
    ErrorList->AddRecord( AElements, AVals );
 }
 
-bool TGXFileObj::ResultWillBeSorted( const int *ADomainNrs )
+bool TGXFileObj::ResultWillBeSorted( const int *ADomainNrs ) const
 {
    for( int D {}; D < FCurrentDim; D++ )
    {
@@ -1584,8 +1583,9 @@ bool TGXFileObj::ResultWillBeSorted( const int *ADomainNrs )
             break;
          default:
             if( UELTable->GetMapToUserStatus() >= TUELUserMapStatus::map_sorted ) continue;
-            const TDFilter *PFilter = FilterList->FindFilter( ADomainNrs[D] );
-            if( !PFilter->FiltSorted ) return false;
+            if(  const TDFilter *PFilter = FilterList->FindFilter( ADomainNrs[D] );
+               !PFilter->FiltSorted )
+               return false;
             break;
       }
    }
@@ -2138,7 +2138,7 @@ int TGXFileObj::gdxDataErrorCount() const
 
 int TGXFileObj::gdxDataErrorRecord( int RecNr, int *KeyInt, double *Values )
 {
-   int res { gdxDataErrorRecordX( RecNr, KeyInt, Values ) };
+   const int res { gdxDataErrorRecordX( RecNr, KeyInt, Values ) };
    if( res )
    {
       for( int D {}; D < ErrorList->GetDimension(); D++ )
@@ -2730,7 +2730,7 @@ int TGXFileObj::gdxDataWriteMap( const int *KeyInt, const double *Values )
    }
    for( int D {}; D < FCurrentDim; D++ )
    {
-      int KD = UELTable->UsrUel2Ent->GetMapping( KeyInt[D] );
+      const int KD = UELTable->UsrUel2Ent->GetMapping( KeyInt[D] );
       if( KD < 0 )
       {
          // NOTE: Not covered by unit tests yet.
@@ -2772,7 +2772,7 @@ int TGXFileObj::gdxUELRegisterMap( int UMap, const char *Uel )
 
 int TGXFileObj::gdxDataReadMapStart( int SyNr, int &NrRecs )
 {
-   auto XDomains = utils::arrayWithValue<int, GLOBAL_MAX_INDEX_DIM>( DOMC_STRICT );
+   const auto XDomains = utils::arrayWithValue<int, GLOBAL_MAX_INDEX_DIM>( DOMC_STRICT );
    NrRecs = PrepareSymbolRead( "DataReadMapStart"s, SyNr, XDomains.data(), fr_map_data );
    return NrRecs >= 0;
 }
@@ -2821,9 +2821,9 @@ again:
       {
          assert( D >= 0 && D < GLOBAL_MAX_INDEX_DIM );
          const auto &obj = DomainList[D];
-         if( LastElem[D] < 0 )
+         // AS: Should this also be appended to the data error list???
+         if( LastElem[D] < 0 || LastElem[D] >= UELTable->size() + (UELTable->OneBased?1:0) )
          {
-            // NOTE: Not covered by unit tests yet.
             ReportError( ERR_BADELEMENTINDEX );
             BadError = true;
             break;
@@ -2834,9 +2834,8 @@ again:
                KeyInt[D] = LastElem[D];
                break;
             case TgdxDAction::dm_filter:
-            {
-               int V { UELTable->GetUserMap( LastElem[D] ) };
-               if( obj.DFilter->InFilter( V ) ) KeyInt[D] = V;
+               if( const int V { UELTable->GetUserMap( LastElem[D] ) }; obj.DFilter->InFilter( V ) )
+                  KeyInt[D] = V;
                else
                {
                   AddError = true;
@@ -2844,11 +2843,9 @@ again:
                   loopDone = true;
                }
                break;
-            }
             case TgdxDAction::dm_strict:
-            {
-               int V { UELTable->GetUserMap( LastElem[D] ) };
-               if( V >= 0 ) KeyInt[D] = V;
+               if( const int V { UELTable->GetUserMap( LastElem[D] ) }; V >= 0 )
+                  KeyInt[D] = V;
                else
                {
                   AddError = true;// NOTE: Not covered by unit tests yet.
@@ -2856,13 +2853,12 @@ again:
                   loopDone = true;
                }
                break;
-            }
             case TgdxDAction::dm_expand:// no filter, allow growth of domain
-               // NOTE: Not covered by unit tests yet.
                {
-                  int EN = LastElem[D];
-                  int V { UELTable->GetUserMap( EN ) };
-                  if( V >= 0 ) KeyInt[D] = V;
+                  // NOTE: Not covered by unit tests yet.
+                  const int EN = LastElem[D];
+                  if( const int V { UELTable->GetUserMap( EN ) }; V >= 0 )
+                     KeyInt[D] = V;
                   else
                   {
                      KeyInt[D] = -EN;
@@ -2877,7 +2873,7 @@ again:
    }
 
    if( BadError ) return false;
-   else if( AddError )
+   if( AddError )
    {
       for( int D {}; D < FCurrentDim; D++ )
       {
@@ -2919,10 +2915,9 @@ again:
       // NOTE: Not covered by unit tests yet.
       for( int D {}; D < FCurrentDim; D++ )
       {
-         int EN = KeyInt[D];
-         if( EN < 0 )
+         if( const int EN = KeyInt[D]; EN < 0 )
          {
-            int V = UELTable->NewUsrUel( -EN );
+            const int V = UELTable->NewUsrUel( -EN );
             KeyInt[D] = V;
             NrMappedAdded++;
             // look for same mapping to be issued
@@ -3129,11 +3124,10 @@ int TGXFileObj::gdxGetDomainElements( int SyNr, int DimPos, int FilterNr, TDomai
    while( DoRead( AVals.data(), AFDim ) )
    {
       assert( DimPos >= 1 && DimPos <= GLOBAL_MAX_INDEX_DIM );
-      int RawNr { LastElem[DimPos - 1] };
+      const int RawNr { LastElem[DimPos - 1] };
       if( DFilter )
       {
-         int MapNr { UELTable->GetUserMap( RawNr ) };
-         if( !DFilter->InFilter( MapNr ) )
+         if( const int MapNr { UELTable->GetUserMap( RawNr ) }; !DFilter->InFilter( MapNr ) )
          {
             // NOTE: Not covered by unit tests yet.
             //Register this record as a domain error (negative value indicates domain violation)
@@ -3227,7 +3221,7 @@ int TGXFileObj::gdxAcronymAdd( const char *AName, const char *Txt, int AIndx )
 
 int TGXFileObj::gdxAcronymIndex( double V ) const
 {
-   return V < Zvalacr ? 0 : static_cast<int>( std::round( V / Zvalacr ) );
+   return V < Zvalacr ? 0 : utils::round<int>( V / Zvalacr );
 }
 
 int TGXFileObj::gdxAcronymName( double V, char *AName )
@@ -3432,7 +3426,7 @@ int TGXFileObj::gdxOpenAppend( const char *FileName, const char *Producer, int &
    {
       ReportError( ERR_FILETOOLDFORAPPEND );
       gdxClose();
-      return res;
+      return 0;
    }
    fmode = fw_init;
    fstatus = stat_write;
@@ -3730,7 +3724,7 @@ bool TUELTable::empty() const
    return !FCount;
 }
 
-int TUELTable::GetUserMap( int i )
+int TUELTable::GetUserMap( int i ) const
 {
    return *GetObject( i );
 }
@@ -3827,7 +3821,7 @@ void TUELTable::RenameEntry( int N, const char *s )
 
 int TUELTable::MemoryUsed() const
 {
-   return (int) TXStrHashListImpl<int>::MemoryUsed() + UsrUel2Ent->MemoryUsed();
+   return static_cast<int>( TXStrHashListImpl<int>::MemoryUsed() ) + UsrUel2Ent->MemoryUsed();
 }
 
 void TUELTable::SaveToStream( TXStream &S )
