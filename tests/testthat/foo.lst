@@ -1,0 +1,31 @@
+GAMS 49.5.0  b32bf9f5 Apr 29, 2025          LEX-LEG x86 64bit/Linux - 05/07/25 11:18:02 Page 1
+G e n e r a l   A l g e b r a i c   M o d e l i n g   S y s t e m
+C o m p i l a t i o n
+
+
+   1   
+   2  Set foo /
+   3    'i1' ,
+   4    'i2' ,
+   5    'i3' /;
+   7   
+   8  Set i(*) /
+   9  'i1',
+  10  'i2',
+  11  'i3' /;
+  12   
+  13  Parameter p(i) / /;
+  14   
+
+
+COMPILATION TIME     =        0.001 SECONDS      3 MB  49.5.0 b32bf9f5 LEX-LEG
+
+
+USER: GAMS Tech Support License                      G250304+0003Cc-GEN
+      GAMS Software GmbH/GAMS Development Corp.                 DCE4131
+
+
+**** FILE SUMMARY
+
+Input      /home/atharv/gtr/gams-transfer-r/gamstransfer/tests/testthat/foo.gms
+Output     /home/atharv/gtr/gams-transfer-r/gamstransfer/tests/testthat/foo.lst

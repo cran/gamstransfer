@@ -1,8 +1,8 @@
 /*
 * GAMS - General Algebraic Modeling System GDX API
  *
- * Copyright (c) 2017-2024 GAMS Software GmbH <support@gams.com>
- * Copyright (c) 2017-2024 GAMS Development Corp. <support@gams.com>
+ * Copyright (c) 2017-2025 GAMS Software GmbH <support@gams.com>
+ * Copyright (c) 2017-2025 GAMS Development Corp. <support@gams.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,7 +23,7 @@
  * SOFTWARE.
  */
 
-#include "p3utils.h"
+#include "p3utils.hpp"
 
 #include <algorithm>               // for max, min
 #include <array>                   // for array
@@ -34,12 +34,13 @@
 #include <filesystem>              // for path
 #include <string>                  // for basic_string, operator+, string
 
-#include "../gdlib/strutilx.h"     // for DblToStr
-#include "../gdlib/utils.h"        // for in, trim, val
-#include "global/modhead.h"        // for STUBWARN
-#include "math_p3.h"               // for IntPower
-#include "p3platform.h"            // for tOSPlatform, OSPlatform, OSFileType
-#include "sysutils_p3.h"           // for ExtractFilePath, ExcludeTrailingPa...
+#include "../gdlib/strutilx.hpp"     // for DblToStr
+#include "../gdlib/utils.hpp"        // for in, trim, val
+
+#include "math_p3.hpp"               // for IntPower
+#include "p3platform.hpp"            // for tOSPlatform, OSPlatform, OSFileType
+#include "sysutils_p3.hpp"           // for ExtractFilePath, ExcludeTrailingPa...
+#include "p3io.hpp"
 
 #if defined(_WIN32)
    // Windows
@@ -49,6 +50,7 @@
       //#define _WINSOCK2API_
       #define _WINSOCKAPI_ /* Prevent inclusion of winsock.h in windows.h */
       #include <winsock2.h>
+      #include <ws2tcpip.h>
    #endif
    #include <Windows.h>
    #include <io.h>
@@ -74,9 +76,9 @@
    #endif
    #include <netinet/in.h>
    #include <unistd.h>
-   #include <dlfcn.h>
    #include <poll.h>
 #endif
+#include "dtoaLoc.h"
 
 using namespace rtl::sysutils_p3;
 using namespace rtl::p3platform;
@@ -110,9 +112,9 @@ bool PrefixPath( const std::string &s )
 {
    if( s.empty() ) return true;
 
-   const auto prevPath = rtl::sysutils_p3::QueryEnvironmentVariable( "PATH" );
-   const std::string newPath = s + rtl::sysutils_p3::PathSep + prevPath;
-   return !rtl::sysutils_p3::AssignEnvironmentVariable( "PATH", newPath );
+   const auto prevPath = QueryEnvironmentVariable( "PATH" );
+   const std::string newPath = s + PathSep + prevPath;
+   return !AssignEnvironmentVariable( "PATH", newPath );
 }
 
 bool P3SetEnv( const std::string &name, const std::string &val )
@@ -321,7 +323,7 @@ static constexpr std::array<DWORD, 3> accessMode {
 // this works for GDX so we do it: it is kind of silly to use the
 // shareMode var then but why not?
 static constexpr std::array<DWORD, 3> shareMode {
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE };
 static constexpr std::array<DWORD, 3> createHow {
@@ -350,10 +352,9 @@ static inline bool p3IsValidHandle(const Tp3FileHandle h) {
 int p3FileOpen( const std::string &fName, Tp3FileOpenAction mode, Tp3FileHandle &h )
 {
 #if defined(_WIN32)
-   DWORD lowMode;
-   HANDLE hFile;
+   HANDLE hFile {};
 
-   lowMode = mode & 3;
+   const DWORD lowMode = mode & 3;
    if (3 == lowMode) {
       h = INVALID_HANDLE_VALUE;
       return ERROR_INVALID_PARAMETER;
@@ -370,20 +371,30 @@ int p3FileOpen( const std::string &fName, Tp3FileOpenAction mode, Tp3FileHandle 
       }
    }
    else
-      hFile = CreateFileA (fName.c_str(), accessMode[lowMode], shareMode[lowMode], nullptr,
+   {
+      bool longAbsPath {};
+#if defined(_WIN32)
+      longAbsPath = fName.length() > MAX_PATH && std::isalpha(fName.front()) && fName[1] == ':';
+#endif
+      if(longAbsPath)
+         hFile = CreateFileA ((R"(\\?\)"+fName).c_str(), accessMode[lowMode], shareMode[lowMode], nullptr,
                           createHow[lowMode], FILE_ATTRIBUTE_NORMAL, nullptr);
-   if (INVALID_HANDLE_VALUE == hFile) {
+      else
+         hFile = CreateFileA (fName.c_str(), accessMode[lowMode], shareMode[lowMode], nullptr,
+                          createHow[lowMode], FILE_ATTRIBUTE_NORMAL, nullptr);
+   }
+   if( INVALID_HANDLE_VALUE == hFile )
+   {
       h = INVALID_HANDLE_VALUE;
-      int result = win2c(static_cast<int>(GetLastError()));
-      if (0 == result) { /* ouch: just pick a likely but non-specific code */
+      int result = win2c( static_cast<int>( GetLastError() ) );
+      if( 0 == result )
+      { /* ouch: just pick a likely but non-specific code */
          result = EACCES;
       }
       return result;
    }
-   else {
-      h = hFile;
-      return 0;
-   }
+   h = hFile;
+   return 0;
 #else
    if (fName.empty()) {
       if (mode == Tp3FileOpenAction::p3OpenRead)
@@ -402,7 +413,7 @@ int p3FileOpen( const std::string &fName, Tp3FileOpenAction mode, Tp3FileHandle 
       flags |= O_CREAT;
    if (flags & 1)
       flags |= O_TRUNC;
-   int fd = open(fName.c_str(), flags, 0666);
+   const int fd = open(fName.c_str(), flags, 0666);
    if (-1 == fd) {
       h = 0;
       return errno;
@@ -411,8 +422,7 @@ int p3FileOpen( const std::string &fName, Tp3FileOpenAction mode, Tp3FileHandle 
    // before calling this a success, check for directory on read-only
    struct stat statBuf {};
    if (p3OpenRead == mode) {
-      int rc = fstat (fd, &statBuf);
-      if (rc)
+      if ( const int rc = fstat( fd, &statBuf ) )
          result = errno;
       else if (S_ISDIR(statBuf.st_mode))
          result = EISDIR;
@@ -573,10 +583,10 @@ int p3FileSetPointer(Tp3FileHandle h, int64_t distance, int64_t &newPointer, uin
          return EINVAL;
    }
    // check if conversion to off_t loses info
-   auto offset = (off_t)distance;
-   if (offset != distance) // only can happen on 32 bit machines?
+   const auto offset = (off_t)distance;
+   if( offset != distance )// only can happen on 32 bit machines?
       return EOVERFLOW;
-   off_t newPos = lseek (h, offset, w);
+   const off_t newPos = lseek (h, offset, w);
    if ((off_t)-1 == newPos)
       return errno;
    newPointer = newPos;
@@ -640,29 +650,30 @@ int p3FileGetPointer(Tp3FileHandle h, int64_t &filePointer)
 bool p3StandardLocations( Tp3Location locType, const std::string &appName, TLocNames &locNames, int &eCount )
 {
    eCount = 0;
-   locNames = { ""s };// { rtl::sysutils_p3::GetCurrentDir() };
-   bool res = p3WritableLocation( locType, appName, locNames.front() );
+   locNames = { ""s };// { GetCurrentDir() };
+   const bool res = p3WritableLocation( locType, appName, locNames.front() );
    if( p3Documents == locType ) return res;
 
-   bool isDataLoc { utils::in( locType, p3Data, p3AppData, p3AppLocalData ) };
+   const bool isDataLoc { utils::in( locType, p3Data, p3AppData, p3AppLocalData ) };
 
    if( OSFileType() == OSFileWIN )
    {
-      bool isConfigLoc { utils::in( locType, p3Config, p3AppConfig ) };
+      const bool isConfigLoc { utils::in( locType, p3Config, p3AppConfig ) };
       if( isConfigLoc || isDataLoc )
       {
-         std::string suffix = appName.empty() ? ""s : PathDelim + appName;
+         const std::string suffix = appName.empty() ? ""s : PathDelim + appName;
          locNames.emplace_back( "C:\\ProgramData" + suffix );
       }
       if( isDataLoc )
       {
-         std::string execName, msg;
-         if( p3GetExecName( execName, msg ) )
+         std::string execName;
+         if( std::string msg;
+             p3GetExecName( execName, msg ) )
          {
             eCount++;
             return res;
          }
-         std::string execPath { ExtractFilePath( execName ) };
+         const std::string execPath { ExtractFilePath( execName ) };
          locNames.emplace_back( ExcludeTrailingPathDelimiter( execPath ) );
          locNames.emplace_back( execPath + "data"s );
          if( !appName.empty() ) locNames.emplace_back( locNames.back() + PathDelim + appName );
@@ -772,7 +783,7 @@ bool p3WritableLocation( Tp3Location locType, const std::string &appName, std::s
       }
    }
    if( !locName.empty() && !appName.empty() && utils::in( locType, p3Config, p3AppConfig, p3Data, p3AppData, p3AppLocalData ) )
-      locName += rtl::sysutils_p3::PathDelim + appName;
+      locName += PathDelim + appName;
    return !locName.empty();
 #else
    std::string dd = appName.empty() ? ""s : PathDelim + appName;
@@ -843,7 +854,7 @@ double RealTrunc( double x )
    return static_cast<int>( x );
 }
 
-double ReadRound( double x )
+double RealRound( double x )
 {
    return static_cast<int>( x + 0.5 * ( x >= 0 ? 1.0 : -1.0 ) );
 }
@@ -861,23 +872,28 @@ bool delphiGetDecDigits( double y, int mode, int nDigits, std::string &digits, i
 {
    // ...
    // TODO: Implement me!
-   STUBWARN();
+   throw std::runtime_error("Not fully implemented yet!");
    return false;
 }
 
-bool p3GetDecDigits( double y, int mode, int nDigits, std::string &digits, int &decPos, int &minusCnt )
+bool p3GetDecDigits( const double y, const int mode, const int nDigits, std::string &digits, int &decPos, int &minusCnt )
 {
-   // ...
-   // TODO: Implement me!
-   STUBWARN();
-   return false;
+   std::array<char, 256> buf;
+   char *pend;
+   const auto p = dtoaLoc( y, mode, nDigits, buf.data(), buf.size() * sizeof( char ), &decPos, &minusCnt, &pend );
+   if( !p )
+      return false;
+   //int totdig = pend - p;
+   minusCnt = !!minusCnt;// 1 if negative, 0 otherwise
+   digits.assign( p );
+   return true;
 }
 
 std::string p3FloatToEfmt( double x, int width, int decimals )
 {
    // ...
    // TODO: Implement me!
-   STUBWARN();
+   throw std::runtime_error("Not fully implemented yet!");
    return {};
 }
 
@@ -887,13 +903,13 @@ std::string getDigits( const int64_t i64 )
 {
    constexpr int M = 100000000, LOGM = 8;
    auto i = static_cast<int>( i64 );
-   if( i == i64 ) return rtl::sysutils_p3::IntToStr( i );
+   if( i == i64 ) return IntToStr( i );
    i = static_cast<int>( i64 % M );
-   std::string s = rtl::sysutils_p3::IntToStr( i );
+   std::string s = IntToStr( i );
    i = LOGM - static_cast<int>( s.length() );
    if( i > 0 ) s = std::string( i, '0' ) + s;
    i = static_cast<int>( i64 / M );
-   std::string res = rtl::sysutils_p3::IntToStr( i ) + s;
+   std::string res = IntToStr( i ) + s;
    // strip trailing zeros
    for( i = static_cast<int>( res.length() ) - 1; i >= 1 && res.back() == '0'; i-- )
       res.pop_back();
@@ -907,7 +923,7 @@ T myMin( T a, T b )
 }
 
 // FIXME: AS: This seems slow.
-std::string FloatToE( double y, int decimals )
+std::string FloatToE( const double y, int decimals )
 {
    auto myRoundTo = []( const double x, const int i ) -> double {
       const double zeroFive = 0.5 * ( x > 0.0 ? 1.0 : -1.0 );
@@ -915,10 +931,10 @@ std::string FloatToE( double y, int decimals )
       if( i > 0 )
       {
          // use positive power of 10 to avoid roundoff error in z
-         const double z { rtl::math_p3::IntPower( 10, i ) };
-         return static_cast<int>( x * z + zeroFive ) * z;
+         const double z { math_p3::IntPower( 10, i ) };
+         return static_cast<int>( x * z + zeroFive ) / z;
       }
-      const double z { rtl::math_p3::IntPower( 10, -i ) };
+      const double z { math_p3::IntPower( 10, -i ) };
       return static_cast<int>( x / z + zeroFive ) * z;
    };
 
@@ -928,7 +944,7 @@ std::string FloatToE( double y, int decimals )
    if( x != 0.0 )
    {
       int n {};
-      while( x >= 1.0 )
+      while( x >= 10.0 )
       {
          n++;
          x /= 10.0;
@@ -938,9 +954,13 @@ std::string FloatToE( double y, int decimals )
          n--;
          x *= 10.0;
       }
-      x = myRoundTo( x, decimals ) * rtl::math_p3::IntPower( 10.0, n );
+      x = myRoundTo( x, decimals ) * math_p3::IntPower( 10.0, n );
    }
-   std::string s { gdlib::strutilx::DblToStr( x ) };
+   //std::string s { gdlib::strutilx::DblToStr( x ) };
+   std::array<char, 255> sbuf {};
+   size_t eLen;
+   p3io::P3_Str_dd0( x, sbuf.data(), 255, &eLen );
+   std::string s { sbuf.data() };
 
    // edit and fix sign
    int k = LastDelimiter( "+-", s );
@@ -952,7 +972,7 @@ std::string FloatToE( double y, int decimals )
    int e, i;
    utils::val( s.substr( k, 5 ), e, i );
    e = std::abs( e );
-   return res + s.substr( s.length() - 2, 2 );
+   return res + ( e > 99 ? IntToStr( e ) : s.substr( s.length() - 2, 2 ) );
 }
 
 std::string ParamStrZero()
@@ -978,6 +998,7 @@ std::string loadPathVarName()
       case OSDarwin_arm64:
          return "DYLD_LIBRARY_PATH"s;
       case OSLinux86_64:
+      case OSLinux_arm64:
          return "LD_LIBRARY_PATH";
       default:
          return {};
@@ -999,7 +1020,7 @@ bool PrefixLoadPath( const std::string &dir )
            ldPath = loadPathVarName();
    if( ldPath.empty() ) return true;
    const char *tptr { getenv( ldPath.c_str() ) };
-   return setEnvironmentVariableUnix( ldPath, s + ( tptr ? ""s + rtl::sysutils_p3::PathSep + tptr : ""s ) );
+   return setEnvironmentVariableUnix( ldPath, s + ( tptr ? ""s + PathSep + tptr : ""s ) );
 #endif
 }
 
@@ -1034,10 +1055,14 @@ bool PrefixEnv( const std::string &dir, const std::string &evName )
    std::string tPtr { trimDir + PathSep + opPtr };
    return SetEnvironmentVariableA( evName.c_str(), tPtr.c_str() );
 #else
-   std::string tptr = getenv( evName.c_str() );
-   if( tptr.empty() ) return setEnvironmentVariableUnix( evName, dir );
-   if( tptr.length() >= trimDir.length() && dir == tptr &&
-       ( tptr.length() == trimDir.length() || tptr[trimDir.length()] == PathSep ) ) return true;
+   const auto tptrBuf = getenv( evName.c_str() );
+   if( !tptrBuf || tptrBuf[0] == '\0' ) // fail or empty
+      return setEnvironmentVariableUnix( evName, dir );
+   std::string tptr {tptrBuf};
+   if( tptr.length() >= trimDir.length()
+      && dir == tptr
+      && ( tptr.length() == trimDir.length() || tptr[trimDir.length()] == PathSep ) )
+      return true;
    return setEnvironmentVariableUnix( evName, dir + PathSep + tptr );
 #endif
 }
@@ -1087,7 +1112,7 @@ int xGetExecName( std::string &execName, std::string &msg )
    if( k <= 0 )
    {
       myStrError( errno, tmpBuf.data(), sizeof( char ) * tmpBuf.size() );
-      msg = "proc_pidpath(pid="s + rtl::sysutils_p3::IntToStr( pid ) + ") failed: "s + std::string( tmpBuf.begin(), tmpBuf.end() );
+      msg = "proc_pidpath(pid="s + IntToStr( pid ) + ") failed: "s + std::string( tmpBuf.begin(), tmpBuf.end() );
       execName.clear();
       rc = 4;
    }
@@ -1106,13 +1131,13 @@ int xGetExecName( std::string &execName, std::string &msg )
    }
    else
    {
-      ssz = std::min<decltype(ssz)>( execBuf.size() - 1, ssz );
+      ssz = std::min<decltype( ssz )>( execBuf.size() - 1, ssz );
       rc = 0;
    }
 #elif defined( _WIN32 )
-   if( const auto k = GetModuleFileNameA( nullptr, execBuf.data(), static_cast<DWORD>(sizeof( char ) * execBuf.size()) ); !k )
+   if( const auto k = GetModuleFileNameA( nullptr, execBuf.data(), static_cast<DWORD>( sizeof( char ) * execBuf.size() ) ); !k )
    {
-      msg = "GetModuleFileName() failure: rc="s + rtl::sysutils_p3::IntToStr( k );
+      msg = "GetModuleFileName() failure: rc="s + IntToStr( k );
       execName.clear();
       rc = 4;
    }
@@ -1160,123 +1185,9 @@ int p3GetExecName( std::string &execName, std::string &msg )
 #endif
 }
 
-// FIXME: Do not always return false!
-static bool isLibrary()
-{
-   return false;
-}
-
-static int xGetLibName( std::string &libName, std::string &msg )
-{
-   char libBuf[4096];
-   msg.clear();
-   int rc;
-
-#if defined( __linux ) || defined( __APPLE__ )
-   {
-      char tmpBuf[2048];
-      static_assert( sizeof( tmpBuf ) == 2048 );
-      Dl_info dlInfo;
-      const int k = dladdr( reinterpret_cast<void *>( &xGetLibName ), &dlInfo );
-      if( k > 0 )
-      {
-         strncpy( tmpBuf, dlInfo.dli_fname, sizeof( tmpBuf ) - 1 );
-         tmpBuf[sizeof( tmpBuf ) - 1] = '\0';
-         if( realpath( tmpBuf, libBuf ) )
-            rc = 0;
-         else
-         {
-            myStrError( errno, tmpBuf, sizeof( tmpBuf ) );
-            msg = "realpath() failure: "s + tmpBuf;
-            *libBuf = '\0';
-            rc = 5;
-         }
-      }
-      else
-      {
-         msg = "dladdr() failure"s;
-         *libBuf = '\0';
-         rc = 4;
-      }
-   }
-#elif defined( _WIN32 )
-   {
-      HMODULE h;
-      int k = GetModuleHandleEx( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                             reinterpret_cast<LPCTSTR>( &xGetLibName ), &h );
-      if( k )
-      { /* OK: got a handle */
-         k = static_cast<int>( GetModuleFileNameA( h, libBuf, sizeof( libBuf ) ) );
-         if( 0 == k )
-         {
-            msg = "GetModuleFileName() failure: rc="s + rtl::sysutils_p3::IntToStr(k);
-            *libBuf = '\0';
-            rc = 5;
-         }
-         else
-            rc = 0;
-      }
-      else
-      {
-         msg = "GetModuleHandleEx() failure: rc="s + rtl::sysutils_p3::IntToStr(k);
-         *libBuf = '\0';
-         rc = 4;
-      }
-   }
-#else
-   *libBuf = '\0';
-   msg = "not implemented for this platform"s;
-   rc = 8;
-#endif
-   libName.assign( libBuf );
-   return 0 == rc && strlen( libBuf ) > 255 ? 1 : rc;
-} /* xGetLibName */
-
-int p3GetLibName( std::string &libName, std::string &msg )
-{
-   return xGetLibName( libName, msg );
-#if defined( _WIN32 )
-   libName.clear();
-   if( !isLibrary() )
-   {
-      msg = "Not called from a library"s;
-      return 2;
-   }
-   std::array<char, 256> buf;
-   HMODULE hinstance;
-   auto rc { GetModuleFileNameA( hinstance, buf.data(), static_cast<DWORD>(buf.size()) ) };
-   if( !rc )
-   {
-      msg = "GetModuleFileNameA call failed"s;
-      return 3;
-   }
-   else if( rc >= 256 )
-   {
-      libName.assign( buf.data() );
-      msg = "Result truncated to 255 characters"s;
-      return 1;
-   }
-   else
-   {
-      libName.assign( buf.data() );
-      msg.clear();
-      return 0;
-   }
-#else
-   if( !isLibrary() )
-   {
-      libName.clear();
-      msg = "Not called from a library"s;
-      return 2;
-   }
-   libName.clear();
-   msg = "P3: not yet implemented"s;
-   return 9;
-#endif
-}
-
 #ifdef __IN_CPPMEX__
+// Get the first MAC address as a shortstring, in form aa:bb:1f:0a:b1:22
+// returns true on success, false on failure
 bool p3GetFirstMACAddress( std::string &mac )
 {
 #if defined( __linux__ )
@@ -1297,8 +1208,8 @@ bool p3GetFirstMACAddress( std::string &mac )
       ifreq ifr {};
 
       {
-         struct ifreq *it = ifc.ifc_req;
-         const struct ifreq *const end = it + ( ifc.ifc_len / sizeof( struct ifreq ) );
+         ifreq *it = ifc.ifc_req;
+         const ifreq *const end = it + ifc.ifc_len / sizeof( struct ifreq );
 
          for( ; it != end; ++it )
          {
@@ -1464,6 +1375,7 @@ static void mkInvalidSock(T_P3SOCKET &s)
 #endif
 }
 
+// returns the canonical but OS-specific INVALID SOCKET
 T_P3SOCKET p3SockGetInvalid()
 {
    T_P3SOCKET res {};
@@ -1471,6 +1383,7 @@ T_P3SOCKET p3SockGetInvalid()
    return res;
 }
 
+// returns true if s is an invalid socket, false if s is valid
 bool p3SockIsInvalid( T_P3SOCKET s )
 {
 #if defined(_WIN32)
@@ -1480,6 +1393,8 @@ bool p3SockIsInvalid( T_P3SOCKET s )
 #endif
 }
 
+// close an open socket
+// returns 0 on success, -1 on failure
 int p3SockClose( T_P3SOCKET &s )
 {
    int res;
@@ -1492,6 +1407,8 @@ int p3SockClose( T_P3SOCKET &s )
    return res;
 }
 
+// create a connected socket by hitting the server on the given port
+// returns the socket on success, invalid socket on failure
 T_P3SOCKET p3SockCreateConnectedClient( int port )
 {
    T_P3SOCKET res {};
@@ -1502,8 +1419,9 @@ T_P3SOCKET p3SockCreateConnectedClient( int port )
    SOCKADDR_IN addr {};
    std::memset( &addr, 0, sizeof( addr ) );
    addr.sin_family = AF_INET;
+   //addr.sin_addr.s_addr = inet_addr( "127.0.0.1" );
+   InetPtonA( AF_INET, "127.0.0.1", &addr );
    addr.sin_port = htons( port );
-   addr.sin_addr.s_addr = inet_addr( "127.0.0.1" );
    if( connect( s, reinterpret_cast<SOCKADDR *>( &addr ), sizeof( addr ) ) == SOCKET_ERROR )
       return res;
    res.wsocket = s;
@@ -1523,18 +1441,84 @@ T_P3SOCKET p3SockCreateConnectedClient( int port )
 #endif
 }
 
+// control the nonblocking bit for the socket s
+// mode=false: --> NONBLOCK bit is disabled (this is the default on socket creation)
+// mode= true: --> NONBLOCK bit is enabled
+// returns true if the operation succeeded, false o/w
+bool p3SockSetNonBlockingMode(const T_P3SOCKET s, bool mode)
+{
+#if defined(_WIN32)
+   auto u {mode ? 1ul : 0};
+   return NO_ERROR == ioctlsocket( s.wsocket, FIONBIO, &u);
+#else
+   const int fd = s.socketfd;
+   int flags { fcntl( fd, F_GETFL, 0 ) };
+   if( flags < 0 )// error, should never happen
+      return false;
+   if( mode )
+   {
+      if( flags & O_NONBLOCK )
+         return true;// already set
+      flags |= O_NONBLOCK;
+   }
+   else
+   {
+      if( !( flags & O_NONBLOCK ) )
+         return true;// already not set
+      flags &= ~O_NONBLOCK;
+   }
+   return !fcntl( fd, F_SETFL, flags );
+#endif
+}
+
 bool p3SockSendEx(T_P3SOCKET s, const char *buf, int count, int &res, bool pollFirst, int timeOut);
 
+// sends the data in buf via s.  At most count bytes will be sent
+// normal sockets can block on write.  Non-blocking sockets will not block
+// RETURNS
+//   TRUE on success: no-write-because-WOULDBLOCK, or a successful write
+//   FALSE on failure: e.g. waiting interrupted by signal
+// if the function returns TRUE:
+//   *res >= 0: the number of bytes written
+//   *res  < 0: no write was attempted because sufficient space was not available (i.e. WOULDBLOCK)
+// if the function returns FALSE:
+//   *res: errno or GetLastError value
 bool p3SockSend( const T_P3SOCKET s, const char *buf, int count, int &res )
 {
    return p3SockSendEx( s, buf, count, res, false, 0 );
 }
 
+// sends the data in buf via s.  At most count bytes will be sent
+// Prior to reading the socket, we poll the socket (i.e. wait at most timeOut millisecs
+// for some space to become available)
+// RETURNS
+//   TRUE on success: timeout with nothing available, or a successful write
+//   FALSE on failure: e.g. waiting interrupted by signal
+// if the function returns TRUE:
+//   *res >= 0: the number of bytes written
+//   *res  < 0: timeout reached while waiting - no write was attempted because a write would block
+// if the function returns FALSE:
+//   *res: errno or GetLastError value
 bool p3SockSendTimeout( T_P3SOCKET s, const char *buf, const int count, int &res, const int timeOut )
 {
    return p3SockSendEx( s, buf, count, res, true, timeOut );
 }
 
+// sends the data in buf via s.  At most count bytes will be sent
+// if pollFirst is true,
+//   wait/poll at most timeout milliseconds for the socket to be ready before returning
+//   if timeout <= 0, wait/poll returns immediately
+// else
+//   do not wait/poll, but instead immediately make the (potentially blocking) recv call
+// RETURNS
+//   TRUE on success: timeout with no write, or no-write-because-WOULDBLOCK, or a successful write
+//   FALSE on failure: e.g. waiting interrupted by signal
+// if the function returns TRUE:
+//   *res >= 0: the number of bytes written (not necessarily count!!)
+//   *res  < 0: wait/poll called timed out, or no-write-because-WOULDBLOCK
+//              nothing written because the write call would block
+// if the function returns FALSE:
+//   *res: errno or GetLastError value
 bool p3SockSendEx(T_P3SOCKET s, const char *buf, int count, int &res, bool pollFirst, const int timeOut)
 {
    // do not call it this way!!
@@ -1618,6 +1602,21 @@ void p3SockCleanUp()
 #endif
 }
 
+// receives data via s, returning the result in buf.  At most count bytes are read
+// if pollFirst is true,
+//   wait/poll at most timeout milliseconds for the socket to contain data before returning
+//   if timeout <= 0, wait/poll returns immediately
+// else
+//   do not wait/poll, but instead immediately make the (potentially blocking) recv call
+// RETURNS
+//   TRUE on success: timeout with no read, or no-read-because-WOULDBLOCK, or a successful read
+//   FALSE on failure: e.g. waiting interrupted by signal
+// if the function returns TRUE:
+//   *res >= 0: the number of bytes read (zero means end-of-file or end-of-stream)
+//   *res  < 0: wait/poll called timed out, or no-read-because-WOULDBLOCK
+//              nothing read because nothing is available
+// if the function returns FALSE:
+//   *res: errno or GetLastError value
 static bool p3SockRecvEx( const T_P3SOCKET s, char *buf, int count, int &res, bool pollFirst, const int timeOut )
 {
    if( count <= 0 )// do not call it this way!!
@@ -1693,11 +1692,32 @@ static bool p3SockRecvEx( const T_P3SOCKET s, char *buf, int count, int &res, bo
    return true;
 }
 
+// receives data via s, returning the result in buf.  At most count bytes are read
+// normal sockets can block on read.  Non-blocking sockets will not block
+// RETURNS
+//   TRUE on success: no-read-because-WOULDBLOCK, or a successful read
+//   FALSE on failure: e.g. waiting interrupted by signal
+// if the function returns TRUE:
+//   *res >= 0: the number of bytes read (zero means end-of-file or end-of-stream)
+//   *res  < 0: no read was attempted because nothing was available (i.e. WOULDBLOCK)
+// if the function returns FALSE:
+//   *res: errno or GetLastError value
 bool p3SockRecv( const T_P3SOCKET s, char *buf, const int count, int &res )
 {
    return p3SockRecvEx( s, buf, count, res, false, 0 );
 }
 
+// receives data via s, returning the result in buf.  At most count bytes are read
+// Prior to reading the socket, we poll the socket (i.e. wait at most timeOut millisecs
+// for some data to arrive that we can read)
+// RETURNS
+//   TRUE on success: timeout with nothing available, or a successful read
+//   FALSE on failure: e.g. waiting interrupted by signal
+// if the function returns TRUE:
+//   *res >= 0: the number of bytes read (zero means end-of-file or end-of-stream)
+//   *res  < 0: timout reached - no read was attempted because nothing is available
+// if the function returns FALSE:
+//   *res: errno or GetLastError value
 bool p3SockRecvTimeout( const T_P3SOCKET s, char *buf, const int count, int &res, const int timeOut )
 {
    return p3SockRecvEx( s, buf, count, res, true, timeOut );
@@ -1705,19 +1725,39 @@ bool p3SockRecvTimeout( const T_P3SOCKET s, char *buf, const int count, int &res
 
 // wait for / accept a client connection to the server socket
 // returns the connected socket on success, invalid sockwet on failure
-T_P3SOCKET p3SockAcceptClientConn( T_P3SOCKET srvSock )
+// timeOut = 0 means no timeout, otherwise it is the timeout in milliseconds
+T_P3SOCKET p3SockAcceptClientConn( T_P3SOCKET srvSock, const uint32_t timeOut )
 {
    T_P3SOCKET res {};
    mkInvalidSock( res );
+#if defined(_WIN32)
+   const auto &listenSock {srvSock.wsocket};
+   constexpr int selectSock {0};
+#else
+   const auto &listenSock {srvSock.socketfd};
+   const int selectSock {listenSock+1};
+#endif
+   if( timeOut )
+   {
+      fd_set readfds;
+      FD_ZERO( &readfds );
+      FD_SET( listenSock, &readfds );
+      timeval timeout {};
+      timeout.tv_sec = static_cast<long>( timeOut / 1000 );
+      timeout.tv_usec = static_cast<long>( timeOut % 1000 * 1000 );
+      if( const int rc { select( selectSock, &readfds, nullptr, nullptr, &timeout ) };
+          rc <= 0 || !FD_ISSET( listenSock, &readfds ) )
+         return res;// invalid sock
+   }
 #if defined( _WIN32 )
-   res.wsocket = accept( (SOCKET) srvSock.wsocket, nullptr, nullptr );
+   res.wsocket = accept( srvSock.wsocket, nullptr, nullptr );
 #else
    sockaddr_in cli {};
    // Accept the client connection request
    socklen_t len { sizeof( cli ) };
    const int connfd {accept(srvSock.socketfd, reinterpret_cast<sockaddr *>( &cli ), &len)};
    if(connfd < 0)
-      return res;
+      return res;// invalid sock
    assert(len <= sizeof(cli));
    res.socketfd = connfd;
 #endif
@@ -1729,36 +1769,45 @@ T_P3SOCKET p3SockAcceptClientConn( T_P3SOCKET srvSock )
 //    set the SO_REUSEADDR option on the socket.  This prevents the socket from
 //    entering the TIME_WAIT state when it is closed
 // returns the socket on success, invalid socket on failure
-T_P3SOCKET p3SockCreateServerSocket( int port, bool reuse )
+T_P3SOCKET p3SockCreateServerSocket( int port, bool reuse, int *retCode )
 {
+   if(retCode)
+      *retCode = 0;
    T_P3SOCKET res {};
    mkInvalidSock( res );
 #if defined( _WIN32 )
-   const auto acceptSocket { socket( AF_INET, SOCK_STREAM, 0 ) };
-   if( INVALID_SOCKET == acceptSocket ) return res;
+   const auto acceptSocket { socket( AF_INET, SOCK_STREAM, IPPROTO_TCP ) };
+   if( INVALID_SOCKET == acceptSocket )
+      return res;
    if( reuse )
    {
       int enable { 1 };
-      // without this magic Windows will bar connections to this port for a small time window
+      // without this magic Windows will bar connections to this port for a small-time window
       // after the socket is closed to avoid delayed packets from a previous connection going to
       // any new connections
-      if( setsockopt( acceptSocket, SOL_SOCKET, SO_REUSEADDR, (char *) &enable, sizeof( int ) ) )
+      if( setsockopt( acceptSocket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char *>( &enable ), sizeof( int ) ) )
          return res;
    }
    SOCKADDR_IN addr;
    (void) std::memset( &addr, 0, sizeof( addr ) );
    addr.sin_family = AF_INET;
-   addr.sin_port = htons( port );
+   // Use inet_pton() or InetPton() instead or define _WINSOCK_DEPRECATED_NO_WARNINGS to disable deprecated API warnings
    addr.sin_addr.s_addr = inet_addr( "127.0.0.1" );
-   int rc { bind( acceptSocket, (SOCKADDR *) &addr, sizeof( addr ) ) };
+   //InetPtonA( AF_INET, "127.0.0.1", &addr );
+   addr.sin_port = htons( port );
+   int rc { bind( acceptSocket, reinterpret_cast<SOCKADDR *>( &addr ), sizeof( addr ) ) };
    if( rc == SOCKET_ERROR )
    {
+      if( retCode )
+         *retCode = WSAGetLastError();
       closesocket( acceptSocket );
       return res;
    }
    rc = listen( acceptSocket, 5 );
    if( rc == SOCKET_ERROR )
    {
+      if( retCode )
+         *retCode = WSAGetLastError();
       closesocket( acceptSocket );
       return res;
    }
@@ -1770,7 +1819,7 @@ T_P3SOCKET p3SockCreateServerSocket( int port, bool reuse )
    if( reuse )
    {
       int enable { 1 };
-      // without this magic Linux/Mac will bar connections to this port for a small time window
+      // without this magic Linux/Mac will bar connections to this port for a small-time window
       // after the socket is closed to avoid delayed packets from a previous connection going to
       // any new connections
       if( setsockopt( sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof( enable ) ) )
@@ -1784,11 +1833,15 @@ T_P3SOCKET p3SockCreateServerSocket( int port, bool reuse )
 
    if( bind( sockfd, reinterpret_cast<sockaddr *>( &servaddr ), sizeof( servaddr ) ) )
    {
+      if(retCode)
+         *retCode = errno;
       (void) close( sockfd );
       return res;
    }
    if( listen( sockfd, 5 ) )
    {
+      if(retCode)
+         *retCode = errno;
       (void) close( sockfd );
       return res;
    }
@@ -1820,7 +1873,7 @@ int p3SockGetPort( T_P3SOCKET s, int &res )
    }
 #else
    socklen_t addrLen = sizeof(sockaddr_in);
-   rc = getsockname(s.socketfd, (sockaddr*)&addr, &addrLen);
+   rc = getsockname(s.socketfd, reinterpret_cast<sockaddr *>( &addr ), &addrLen);
    if(rc)
    {
       res = errno;
@@ -1831,5 +1884,14 @@ int p3SockGetPort( T_P3SOCKET s, int &res )
    return result;
 }
 #endif // __IN_CPPMEX__
+
+int p3SomeIOResult()
+{
+#if defined(_WIN32)
+   return ERROR_OPEN_FAILED;
+#else
+   return 0;
+#endif
+}
 
 }// namespace rtl::p3utils

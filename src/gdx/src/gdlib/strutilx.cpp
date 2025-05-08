@@ -1,8 +1,8 @@
 /*
 * GAMS - General Algebraic Modeling System GDX API
  *
- * Copyright (c) 2017-2024 GAMS Software GmbH <support@gams.com>
- * Copyright (c) 2017-2024 GAMS Development Corp. <support@gams.com>
+ * Copyright (c) 2017-2025 GAMS Software GmbH <support@gams.com>
+ * Copyright (c) 2017-2025 GAMS Development Corp. <support@gams.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,7 +23,7 @@
  * SOFTWARE.
  */
 
-#include "strutilx.h"
+#include "strutilx.hpp"
 #include <algorithm>             // for min, transform, find
 #include <array>                 // for array
 #include <cassert>               // for assert
@@ -32,16 +32,15 @@
 #include <limits>                // for numeric_limits
 #include <stdexcept>             // for runtime_error
 #include <string>                // for basic_string, string, operator+, all...
-#include "../rtl/p3io.h"         // for P3_Str_dd0
-#include "../rtl/p3platform.h"   // for OSFileType, tOSFileType
-#include "../rtl/sysutils_p3.h"  // for LastDelimiter, PathDelim, ExtractSho...
-#include "utils.h"               // for toupper, sameText, ord, in, val, cha...
+#include "../rtl/p3io.hpp"         // for P3_Str_dd0
+#include "../rtl/p3platform.hpp"   // for OSFileType, tOSFileType
+#include "../rtl/sysutils_p3.hpp"  // for LastDelimiter, PathDelim, ExtractSho...
+#include "utils.hpp"               // for toupper, sameText, ord, in, val, cha...
 
 using namespace std::literals::string_literals;
 using namespace rtl::sysutils_p3;
 using namespace rtl::p3platform;
-
-using utils::ui8;
+using namespace utils;
 
 // ==============================================================================================================
 // Implementation
@@ -52,17 +51,26 @@ namespace gdlib::strutilx
 const auto MAXINT_S = "maxint"s, MININT_S = "minint"s;
 const auto MAXDOUBLE_S = "maxdouble"s, EPSDOUBLE_S = "eps"s, MINDOUBLE_S = "mindouble"s;
 
+bool sameTextSR( const DelphiStrRef &sr, const std::string &s )
+{
+   if( s.length() != sr.length ) return false;
+   for( int i {}; i < sr.length; i++ )
+      if( tolower( sr.chars[i] ) != tolower(s[i]) )
+         return false;
+   return true;
+}
+
 std::string UpperCase( const std::string_view s )
 {
    std::string out { s };
-   std::transform( s.begin(), s.end(), out.begin(), utils::toupper );
+   std::transform( s.begin(), s.end(), out.begin(), ::toupper );
    return out;
 }
 
 std::string LowerCase( const std::string_view s )
 {
    std::string out { s };
-   std::transform( s.begin(), s.end(), out.begin(), utils::tolower );
+   std::transform( s.begin(), s.end(), out.begin(), ::tolower );
    return out;
 }
 
@@ -83,11 +91,11 @@ std::string IntToNiceStrW( int64_t n, int width )
    uint8_t k {maxShortStrLen-1}, k2 {};
    // Fill s with digits from the right starting with least significant one
    // Prefix is garbage
-   std::array<char, 256> s;
+   sstring s;
    s.back() = '\0';
    do
    {
-      s[k--] = static_cast<char>(utils::ord('0') - n % 10);
+      s[k--] = static_cast<char>(ord('0') - n % 10);
       n /= 10;
       if(++k2 == 3)
       {
@@ -126,7 +134,7 @@ int StrExcelCol( const std::string &s )
    int res {};
    for( int i {}; i < static_cast<int>( s.length() ); i++ )
    {
-      const int j { utils::ord(utils::toupper( s[i] )) - utils::ord( 'A' ) };
+      const int j { ord(toupper( s[i] )) - ord( 'A' ) };
       if( j < 0 || j > 25 || res >= std::numeric_limits<int>::max() / 26 + 26 )
          return 0;
       res = res * 26 + j + 1;
@@ -139,7 +147,7 @@ std::string ExcelColStr( int C )
    if( C <= 0 ) return {};
    std::string res;
    for( res.clear(); C; C /= 26 )
-      res += static_cast<char>( utils::ord( 'A' ) + --C % 26 );
+      res += static_cast<char>( ord( 'A' ) + --C % 26 );
    return res;
 }
 
@@ -176,7 +184,7 @@ std::string PadRightMod( std::string_view s, const int M )
 //  Sp: Starting position
 // Returns:
 //  Location of the character when found; -1 otherwise
-static int LChPosSp( const char Ch, const char *S, int Sp )
+int LChPosSp( const char Ch, const char *S, int Sp )
 {
    if( Sp < 0 ) Sp = 0;
    for( int K { Sp }; S[K]; K++ )
@@ -184,9 +192,28 @@ static int LChPosSp( const char Ch, const char *S, int Sp )
    return -1;
 }
 
-static int LChPos( const char Ch, const char *S )
+int LChPos( const char Ch, const char *S )
 {
    return LChPosSp( Ch, S, 0 );
+}
+
+// Brief:
+//  Search for a set of characters from the left
+// Arguments:
+//  Cs: Character set to search
+//  S: String to be searched
+// Returns:
+//  Location of the character when found; -1 otherwise
+int LChSetPos( const char *Cs, const char *S, const int slen )
+{
+   const char *c { Cs };
+   for( int k { 0 }; k <= slen - 1; k++ )
+   {
+      while( *c )
+         if( *c++ == S[k] ) return k;
+      c = Cs;
+   }
+   return -1;
 }
 
 // Brief:
@@ -196,7 +223,7 @@ static int LChPos( const char Ch, const char *S )
 //  S: String to be searched
 // Returns:
 //  Location of the character when found; -1 otherwise
-static int RChSetPos( const char *Cs, const char *S, const int slen )
+int RChSetPos( const char *Cs, const char *S, const int slen )
 {
    const char *c {Cs};
    for( int k {slen-1}; k >= 0; k-- )
@@ -224,7 +251,7 @@ static uint8_t DblToStrSepCore(double V, const char DecimalSep, char *s)
    if( V >= 1e-4 && V < 1e15 )
    {
       int e, scrap;
-      utils::val( &s[k], 5, e, scrap );
+      val( &s[k], 5, e, scrap );
       for( int i = k - 1; i < slen; i++ )
          s[i] = '0';
       if( e >= 0 )
@@ -276,6 +303,7 @@ static uint8_t DblToStrSepCore(double V, const char DecimalSep, char *s)
             if( i == static_cast<int>( slen ) )
                s[k - 1] = ' ';
          }
+         else break;
       }
       for( int i = k - 2; i >= j + 1; i-- )
       {
@@ -304,7 +332,7 @@ std::string DblToStrSep( double V, const char DecimalSep )
 {
    if( V == 0.0 )
       return "0"s;
-   std::array<char, 256> s;
+   sstring s;
    const auto slen { DblToStrSepCore( V, DecimalSep, s.data() ) };
    // only with short strings
    std::string res;
@@ -348,19 +376,19 @@ uint8_t DblToStr(double V, char* s)
 
 bool StrAsIntEx( const std::string &s, int &v )
 {
-   if( utils::sameText( s, MAXINT_S ) )
+   if( sameText( s, MAXINT_S ) )
    {
       v = std::numeric_limits<int>::max();
       return true;
    }
-   if( utils::sameText( s, MININT_S ) )
+   if( sameText( s, MININT_S ) )
    {
       v = std::numeric_limits<int>::min();
       return true;
    }
 
    int k;
-   utils::val( s, v, k );
+   val( s, v, k );
    return !k;
 }
 
@@ -396,26 +424,26 @@ std::string ExtractFileNameEx( const std::string &FileName )
 
 bool StrAsDoubleEx( const std::string &s, double &v )
 {
-   if( utils::sameText( s, MAXDOUBLE_S ) )
+   if( sameText( s, MAXDOUBLE_S ) )
    {
       v = std::numeric_limits<double>::max();
       return true;
    }
-   if( utils::sameText( s, MINDOUBLE_S ) )
+   if( sameText( s, MINDOUBLE_S ) )
    {
       v = std::numeric_limits<double>::min();
       return true;
    }
-   if( utils::sameText( s, EPSDOUBLE_S ) )
+   if( sameText( s, EPSDOUBLE_S ) )
    {
       v = std::numeric_limits<double>::epsilon();
       return true;
    }
    std::string ws = s;
-   utils::replaceChar( 'D', 'E', ws );
-   utils::replaceChar( 'd', 'E', ws );
+   replaceChar( 'D', 'E', ws );
+   replaceChar( 'd', 'E', ws );
    int k;
-   utils::val( ws, v, k );
+   val( ws, v, k );
    if( std::isnan( v ) || std::isinf( v ) ) return false;
    return !k;
 }
@@ -450,7 +478,7 @@ bool StrUEqual( const std::string_view S1, const std::string_view S2 )
    const int L { static_cast<int>( S1.length() ) };
    if( L != static_cast<int>( S2.length() ) ) return false;
    for( int K { L - 1 }; K >= 0; K-- )// significant stuff at the end?
-      if( utils::toupper( S1[K] ) != utils::toupper( S2[K] ) ) return false;
+      if( toupper( S1[K] ) != toupper( S2[K] ) ) return false;
    return true;
 }
 
@@ -459,7 +487,7 @@ bool StrUEqual( const DelphiStrRef &S1, const std::string_view S2 )
    const auto L { S1.length };
    if( L != S2.length() ) return false;
    for( int K { L - 1 }; K >= 0; K-- )// significant stuff at the end?
-      if( utils::toupper( S1.chars[K] ) != utils::toupper( S2[K] ) ) return false;
+      if( toupper( S1.chars[K] ) != toupper( S2[K] ) ) return false;
    return true;
 }
 
@@ -499,7 +527,7 @@ std::string ExtractToken( const std::string &s, int &p )
    while( p <= L && s[p] == ' ' ) p++;
    if( p > L ) return ""s;
    char Stop;
-   if( !utils::in( s[p], '\'', '\"' ) ) Stop = ' ';
+   if( !in( s[p], '\'', '\"' ) ) Stop = ' ';
    else
    {
       Stop = s[p];
@@ -524,7 +552,7 @@ std::string ExtractToken( const std::string &s, int &p )
 int StrAsInt( const std::string &s )
 {
    int k, res;
-   utils::val( s, res, k );
+   val( s, res, k );
    return k ? 0 : res;
 }
 
@@ -599,11 +627,11 @@ bool checkBOMOffset( const tBomIndic &potBOM, int &BOMOffset, std::string &msg )
 //  S: Source string
 // Returns:
 //  String with characters replaced
-std::string ReplaceChar( const utils::charset &ChSet, const char New, const std::string &S )
+std::string ReplaceChar( const charset &ChSet, const char New, const std::string &S )
 {
    std::string out = S;
    for( char &i: out )
-      if( utils::in( i, ChSet ) )
+      if( in( i, ChSet ) )
          i = New;
    return out;
 }
@@ -618,7 +646,7 @@ std::string ReplaceChar( const utils::charset &ChSet, const char New, const std:
 //  String with substrings replaced
 std::string ReplaceStr( const std::string &substr, const std::string &replacement, const std::string &S )
 {
-   return utils::replaceSubstrs( S, substr, replacement );
+   return replaceSubstrs( S, substr, replacement );
 }
 
 // Brief:
@@ -677,7 +705,7 @@ void strConvDelphiToC( char *delphistr )
 // Value-copy conversion of Pascal/Delphi string (size byte prefix) to C++ standard library (STL) string
 std::string strConvDelphiToCpp( const char *delphistr )
 {
-   std::array<char, 256> buffer {};
+   sstring buffer {};
    const auto len = static_cast<uint8_t>( delphistr[0] );
    for( int i = 0; i < len; i++ )
       buffer[i] = delphistr[i + 1];
@@ -707,7 +735,7 @@ bool PStrUEqual( const std::string_view P1, const std::string_view P2 )
    if( L != P2.length() ) return false;
    for( int K = static_cast<int>( L ) - 1; K >= 0; K-- )
    {
-      if( utils::toupper( P1[K] ) != utils::toupper( P2[K] ) )
+      if( toupper( P1[K] ) != toupper( P2[K] ) )
          return false;
    }
    return true;
@@ -726,7 +754,7 @@ int StrUCmp( const std::string_view S1, const std::string_view S2 )
    if( L > S2.length() ) L = S2.length();
    for( int K {}; K < static_cast<int>( L ); K++ )
    {
-      if( const int d = utils::toupper( S1[K] ) - utils::toupper( S2[K] ) )
+      if( const int d = toupper( S1[K] ) - toupper( S2[K] ) )
          return d;
    }
    return static_cast<int>( S1.length() - S2.length() );
@@ -751,7 +779,7 @@ int StrUCmp( const DelphiStrRef &S1, const DelphiStrRef &S2 )
    if( L > S2.length ) L = S2.length;
    for( int K {}; K < L; K++ )
    {
-      if( const int d = utils::toupper( S1.chars[K] ) - utils::toupper( S2.chars[K] ) )
+      if( const int d = toupper( S1.chars[K] ) - toupper( S2.chars[K] ) )
          return d;
    }
    return S1.length - S2.length;

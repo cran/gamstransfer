@@ -1,8 +1,8 @@
 /*
 * GAMS - General Algebraic Modeling System GDX API
  *
- * Copyright (c) 2017-2024 GAMS Software GmbH <support@gams.com>
- * Copyright (c) 2017-2024 GAMS Development Corp. <support@gams.com>
+ * Copyright (c) 2017-2025 GAMS Software GmbH <support@gams.com>
+ * Copyright (c) 2017-2025 GAMS Development Corp. <support@gams.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,12 +26,13 @@
 #include <string> // for string
 #include <cstring> // for strerror, size_t, strcmp, strcpy
 
-#include "sysutils_p3.h"
-#include "p3platform.h"// for OSFileType, tOSFileType
+#include "p3io.hpp"
+#include "sysutils_p3.hpp"
+#include "p3platform.hpp"// for OSFileType, tOSFileType
 
-#include "global/unit.h" // for UNIT_INIT_FINI
+#include "unit.h" // for UNIT_INIT_FINI
 
-#include "gdlib/utils.h" // for ui16
+#include "utils.hpp" // for ui16
 
 #if defined( _WIN32 )
    #include <Windows.h>
@@ -61,9 +62,11 @@ std::string FileStopper, ExtStopper;
 std::string ExtractShortPathName( const std::string &FileName )
 {
 #if defined( _WIN32 )
-   std::array<char, 260> buf;
+   std::array<char, 260> buf {};
    const auto rc = GetShortPathNameA( FileName.c_str(), buf.data(), static_cast<DWORD>( sizeof( char ) * buf.size() ) );
    assert(rc);
+   if(!rc)
+      throw std::runtime_error("Failed to determine short path name: \""s + FileName + "\""s);
    return buf.data();
 #else
    // TODO: Does this make sense?
@@ -92,6 +95,9 @@ std::string ExtractFileExt( const std::string &FileName )
 bool FileExists( const std::string &FileName )
 {
 #if defined(_WIN32)
+   // put \\?\ in front of long absolute paths
+   if(FileName.length() > MAX_PATH && std::isalpha(FileName.front()) && FileName[1] == ':')
+      return !_access((R"(\\?\)"+FileName).c_str(), 0);
    return !_access(FileName.c_str(), 0);
 #else
    return !access(FileName.c_str(), F_OK);
@@ -101,8 +107,8 @@ bool FileExists( const std::string &FileName )
 static TTimeStamp DateTimeToTimeStamp( global::delphitypes::tDateTime DateTime )
 {
    return {
-           static_cast<int>( round( std::abs( global::delphitypes::frac( DateTime ) ) * MSecsPerDay ) ),
-           static_cast<int>( trunc( DateTime ) + DateDelta ) };
+           utils::round<int>( std::abs( global::delphitypes::frac( DateTime ) ) * MSecsPerDay ),
+           static_cast<int>( static_cast<int64_t>( DateTime ) + DateDelta ) };
 }
 
 void DecodeTime( const global::delphitypes::tDateTime DateTime, uint16_t &Hour, uint16_t &Min, uint16_t &Sec, uint16_t &Msec )
@@ -291,9 +297,9 @@ std::string IncludeTrailingPathDelimiter( const std::string &S )
    return S + PathDelim;
 }
 
-const std::array<uint8_t, 12>
-        daysPerMonthRegularYear = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 },
-        daysPerMonthLeapYear = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+constexpr std::array<uint8_t, 12>
+        daysPerMonthRegularYear { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 },
+        daysPerMonthLeapYear { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
 
 bool isLeapYear( const int year )
 {
@@ -447,7 +453,11 @@ int FindFirst(const std::string &Path, const int Attr, TSearchRec &F )
 #if defined(_WIN32)
    HANDLE fHandle;
    F.FindData = new _WIN32_FIND_DATAA{}; // will be freed in F destructor
-   F.FindHandle = fHandle = FindFirstFileA(Path.c_str(), F.FindData );
+   if(Path.length() > MAX_PATH && std::isalpha(Path.front()) && Path[1] == ':')
+      fHandle = FindFirstFileA((R"(\\?\)"+Path).c_str(), F.FindData );
+   else
+      fHandle = FindFirstFileA(Path.c_str(), F.FindData );
+   F.FindHandle = fHandle;
    if (INVALID_HANDLE_VALUE != fHandle) {
       auto res = FindMatchingFile(F);
       if (res != 0)
@@ -507,7 +517,7 @@ bool tryEncodeDate( const uint16_t year, const uint16_t month, uint16_t day, dou
          } while( i++ != stop );
       }
       i = year - 1;
-      date = trunc( i * 365.0 + i / 4.0 - i / 100.0 + i / 400.0 + day - DateDelta /* + 1*/ );
+      date = static_cast<double>( static_cast<int64_t>( i * 365 + i / 4 - i / 100 + i / 400 + day - DateDelta ) );
       return true;
    }
 
@@ -516,7 +526,7 @@ bool tryEncodeDate( const uint16_t year, const uint16_t month, uint16_t day, dou
 
 static bool tryEncodeTime( const uint16_t hour, const uint16_t minute, const uint16_t sec, const uint16_t msec, double &curt )
 {
-   if( hour < HoursPerDay && minute < MinsPerHour && /*sec < SecsPerDay &&*/ msec < MSecsPerSec )
+   if( hour < HoursPerDay && minute < MinsPerHour && msec < MSecsPerSec )
    {
       curt = ( hour * 36e5 + minute * 6e4 + sec * MSecsPerSec + msec ) / MSecsPerDay;
       return true;
@@ -688,6 +698,66 @@ void IntToStr( int64_t n, char *res, size_t &len )
    res[len] = '\0';
 }
 
+// this is VERY ugly, edit the str() ShortString
+std::string FloatToStr( double v )
+{
+   throw std::runtime_error("Not fully implemented yet!");
+   // TODO: Unfinished!
+
+   std::array<char, 64> sbuf {};
+
+   if (v == 0.0)
+      return "0"s;
+
+   size_t eLen;
+   rtl::p3io::P3_Str_dd0( v, sbuf.data(), 64, &eLen );
+   std::string s { sbuf.data() };
+   if( v < 0.0 )
+      v = -v;
+   int k = LastDelimiter( "+-"s, s );
+   int j = utils::pos( '.', s );
+   if (v >= 1e-4 && v < 1e15)
+   {
+      int i, e;
+      utils::val( s.substr( k, 5 ), e, i );
+      for( i = k - 1; i <= static_cast<int>(s.length()); i++ )
+         s[i] = '0';
+      if (e >= 0)
+      {
+         for (i = j + 1; i <= j + e; i++) {
+            s[i - 1] = s[i];
+         }
+         s[j + e] = '.';
+         for (i = (int)s.length(); i >= j + e + 1; i--) {
+            s[i] = ' ';
+            if( i == j + e + 1 )
+               s[j + e] = ' ';
+            else
+               break;
+         }
+      }
+      else {
+
+      }
+   }
+   else {
+
+   }
+
+   // only for short strings
+   j = 0;
+   std::array<char, 256> res {'\0'};
+   for (int i{}; i < static_cast<int>(s.length()); i++)
+   {
+      if (s[i] != ' ')
+      {
+         j++;
+         res[j] = s[i];
+      }
+   }
+   return { res.data() };
+}
+
 double EncodeTime( const uint16_t hour, const uint16_t min, const uint16_t sec, const uint16_t msec) {
    return ( hour * 3600000.0 + min * 60000 + sec * 1000 + msec ) / ( 24 * 3600000 );
 }
@@ -718,9 +788,11 @@ int DateTimeToFileDate( double dt )
    uint16_t hour, min, sec, msec;
    DecodeTime( dt, hour, min, sec, msec );
 #if defined(_WIN32)
-   LongRec lr {
-      static_cast<uint16_t>( ( sec >> 1 ) | ( min << 5 ) | ( hour << 11 ) ),
-      static_cast<uint16_t>(day | ( month << 5 ) | ( (year - 1980) << 9 ))
+   const LongRec lr {
+      {
+         static_cast<uint16_t>( ( sec >> 1 ) | ( min << 5 ) | ( hour << 11 ) ),
+         static_cast<uint16_t>(day | ( month << 5 ) | ( (year - 1980) << 9 ))
+      }
    };
    static_assert( sizeof( LongRec ) == sizeof( int ) );
    int res;

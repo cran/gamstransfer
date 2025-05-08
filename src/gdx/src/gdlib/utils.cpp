@@ -1,8 +1,8 @@
 /*
  * GAMS - General Algebraic Modeling System GDX API
  *
- * Copyright (c) 2017-2024 GAMS Software GmbH <support@gams.com>
- * Copyright (c) 2017-2024 GAMS Development Corp. <support@gams.com>
+ * Copyright (c) 2017-2025 GAMS Software GmbH <support@gams.com>
+ * Copyright (c) 2017-2025 GAMS Development Corp. <support@gams.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -25,9 +25,9 @@
 
 // FIXME: Get rid of too many "const std::string &" processing functions and use "std::string_view" or "const char *" instead!
 
-#include "utils.h"
-#include "rtl/p3io.h"
-#include "rtl/sysutils_p3.h"
+#include "utils.hpp"
+#include "p3io.hpp"
+#include "sysutils_p3.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -136,11 +136,6 @@ std::string getLineWithSep( std::istream &fs )
       line.push_back( static_cast<char>( fs.get() ) );
    }
    return line;
-}
-
-bool sameTextAsAny( const std::string_view a, const std::initializer_list<std::string_view> &bs )
-{
-   return any<std::string_view>( [&a]( const std::string_view b ) { return sameText( a, b ); }, bs );
 }
 
 bool sameTextPrefix( const std::string_view s, const std::string_view prefix )
@@ -426,7 +421,7 @@ std::list<std::string> split( const std::string_view s, char sep )
 std::list<std::string> splitWithQuotedItems( const std::string_view s )
 {
    constexpr char sep = ' ';
-   const utils::charset quoteChars { '\"', '\'' };
+   const charset quoteChars { '\"', '\'' };
    std::list<std::string> res;
    std::string cur;
    bool inQuote {};
@@ -589,11 +584,9 @@ void stocp( const std::string &s, char *cp )
    std::memcpy( cp, s.c_str(), s.length() + 1 );
 }
 
-inline int b2i( bool b ) { return b ? 1 : 0; }
-
 int strCompare( const std::string_view S1, const std::string_view S2, const bool caseInsensitive )
 {
-   if( S1.empty() || S2.empty() ) return b2i( !S1.empty() ) - b2i( !S2.empty() );
+   if( S1.empty() || S2.empty() ) return static_cast<int>( !S1.empty() ) - static_cast<int>( !S2.empty() );
    auto L = S1.length();
    if( L > S2.length() ) L = S2.length();
    for( size_t K {}; K < L; K++ )
@@ -606,7 +599,7 @@ int strCompare( const std::string_view S1, const std::string_view S2, const bool
    return static_cast<int>( S1.length() - S2.length() );
 }
 
-StringBuffer::StringBuffer( int size ) : s( size, '\0' ), bufferSize { size } {}
+StringBuffer::StringBuffer( const int size ) : s( size, '\0' ), bufferSize { size } {}
 
 char *StringBuffer::getPtr() { return &s[0]; }
 
@@ -747,7 +740,7 @@ void getline( FILE *f, std::string &s )
 std::string getline( FILE *f )
 {
    constexpr int bsize {512};
-   std::array<char, bsize> buf;
+   std::array<char, bsize> buf {};
    if(!std::fgets( buf.data(), bsize, f ) && std::ferror(f))
       return {};
    return buf.data();
