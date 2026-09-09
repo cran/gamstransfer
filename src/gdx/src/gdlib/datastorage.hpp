@@ -1,8 +1,8 @@
 /*
 * GAMS - General Algebraic Modeling System GDX API
  *
- * Copyright (c) 2017-2025 GAMS Software GmbH <support@gams.com>
- * Copyright (c) 2017-2025 GAMS Development Corp. <support@gams.com>
+ * Copyright (c) 2017-2026 GAMS Software GmbH <support@gams.com>
+ * Copyright (c) 2017-2026 GAMS Development Corp. <support@gams.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -44,13 +44,11 @@
 #include "batchalloc.hpp"
 #endif
 
-#if defined( __IN_CPPMEX__ )
-#include "gmsheapnew.hpp"
-// Instead of using builtin C++ heap functionality new/delete, use custom GAMS big block heap from gdlib/gmsheapnew
-#define USE_GMSHEAP
+#ifndef GDX_NS
+#define GDX_NS gdxlib::
 #endif
 
-namespace gdlib::datastorage
+namespace GDX_NS gdlib::datastorage
 {
 
 TLD_TEMPLATE_HEADER
@@ -79,9 +77,7 @@ class TLinkedData final
    using RecType = TLD_REC_TYPE;
    RecType *FHead {}, *FTail {};
 
-#if defined( USE_GMSHEAP )
-   gdlib::gmsheapnew::THeapMgr MyHeap { "TLinkedData" };
-#elif defined( TSH_BATCH_ALLOCS )
+#if defined( TSH_BATCH_ALLOCS )
    batchalloc::BatchAllocator<960, 8> batchAllocator;
 #endif
 
@@ -125,18 +121,14 @@ public:
 
    void Clear()
    {
-#if defined( TSH_BATCH_ALLOCS ) && !defined( USE_GMSHEAP )
+#if defined( TSH_BATCH_ALLOCS )
       batchAllocator.clear();
 #else
       RecType *P { FHead };
       while( P )
       {
          auto Pn = P->RecNext;
-#ifdef USE_GMSHEAP
-         MyHeap.XFreeMem( P, FTotalSize );
-#else
          delete[] P;
-#endif
          P = Pn;
       }
 #endif
@@ -152,27 +144,17 @@ public:
 
    int* AllocIndex()
    {
-#ifdef USE_GMSHEAP
-      return static_cast<int*>(MyHeap.XGetMem( FKeySize ));
-#else
       return new int[FDimension];
-#endif
    }
 
    void FreeIndex(int* p)
    {
-#ifdef USE_GMSHEAP
-      MyHeap.XFreeMem( p, FKeySize );
-#else
       delete[] p;
-#endif
    }
 
    RecType *AddItem( const KeyType *AKey, const ValueType *AData )
    {
-#if defined( USE_GMSHEAP )
-      auto *node = reinterpret_cast<RecType *>( MyHeap.XGetMem( FTotalSize ) );
-#elif defined( TSH_BATCH_ALLOCS )
+#if defined( TSH_BATCH_ALLOCS )
       auto *node = reinterpret_cast<RecType *>( batchAllocator.GetBytes( FTotalSize ) );
 #else
       auto *node = reinterpret_cast<RecType *>( new uint8_t[FTotalSize] );
@@ -202,13 +184,7 @@ public:
       if( !FHead || IsSorted() ) return;
       const int AllocCount = FMaxKey - FMinKey + 1;
       const int KeyBase { FMinKey };
-#if !defined( USE_GMSHEAP )
       auto Head { new RecType *[AllocCount] }, Tail { new RecType *[AllocCount] };
-#else
-      const int64_t AllocSize { static_cast<int64_t>( AllocCount * sizeof( RecType * ) ) };
-      auto Head { reinterpret_cast<RecType **>( MyHeap.XGetMem64( AllocSize ) ) };
-      auto Tail { reinterpret_cast<RecType **>( MyHeap.XGetMem64( AllocSize ) ) };
-#endif
       std::memset( Head, 0, sizeof( RecType * ) * AllocCount );
       std::memset( Tail, 0, sizeof( RecType * ) * AllocCount );
       // Perform radix sort
@@ -237,13 +213,8 @@ public:
          FHead = R;
       }
       FTail = nullptr;// what is the tail???
-#if !defined( USE_GMSHEAP )
       delete[] Head;
       delete[] Tail;
-#else
-      MyHeap.XFreeMem64( Head, AllocSize );
-      MyHeap.XFreeMem64( Tail, AllocSize );
-#endif
    }
 
    std::optional<RecType *> StartRead( const int *AMap = nullptr )
@@ -268,3 +239,7 @@ public:
 };
 
 }// namespace gdlib::datastorage
+
+namespace gdlib {
+namespace datastorage = GDX_NS gdlib::datastorage;
+}

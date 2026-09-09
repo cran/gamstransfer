@@ -1,8 +1,8 @@
 /*
 * GAMS - General Algebraic Modeling System GDX API
  *
- * Copyright (c) 2017-2025 GAMS Software GmbH <support@gams.com>
- * Copyright (c) 2017-2025 GAMS Development Corp. <support@gams.com>
+ * Copyright (c) 2017-2026 GAMS Software GmbH <support@gams.com>
+ * Copyright (c) 2017-2026 GAMS Development Corp. <support@gams.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -28,7 +28,11 @@
 #include <set>
 #include <cstdint>
 
-namespace rtl::math_p3
+#ifndef GDX_NS
+#define GDX_NS gdxlib::
+#endif
+
+namespace GDX_NS rtl::math_p3
 {
 
 enum TFPUException : uint8_t
@@ -51,4 +55,11 @@ void ClearExceptions();
 
 double IntPower( double X, int I );
 
+bool IsNan( double AValue );
+bool IsInfinite( double AValue );
+
 }// namespace rtl::math_p3
+
+namespace rtl {
+namespace math_p3 = GDX_NS rtl::math_p3;
+}

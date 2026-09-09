@@ -1,8 +1,8 @@
 /*
 * GAMS - General Algebraic Modeling System GDX API
  *
- * Copyright (c) 2017-2025 GAMS Software GmbH <support@gams.com>
- * Copyright (c) 2017-2025 GAMS Development Corp. <support@gams.com>
+ * Copyright (c) 2017-2026 GAMS Software GmbH <support@gams.com>
+ * Copyright (c) 2017-2026 GAMS Development Corp. <support@gams.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -44,24 +44,26 @@
 
 #if defined(_WIN32)
    // Windows
-   #ifndef __GNUC__
+   // @aschnabel: it was __GNUC__, but it does not make sense with MINGW.
+   // Changed it to __CYGWIN__, but I don't think we target this??
+   #if defined(_MSC_VER)
       #pragma comment( lib, "iphlpapi.lib" )
       #pragma comment( lib, "Ws2_32.lib" )
       //#define _WINSOCK2API_
-      #define _WINSOCKAPI_ /* Prevent inclusion of winsock.h in windows.h */
-      #include <winsock2.h>
-      #include <ws2tcpip.h>
+      //#define _WINSOCKAPI_ /* Prevent inclusion of winsock.h in windows.h */
    #endif
-   #include <Windows.h>
+   #include <winsock2.h>
+   #include <ws2tcpip.h>
+   #include <windows.h>
    #include <io.h>
    #include <psapi.h> /* enough if we run on Windows 7 or later */
    #include <iphlpapi.h>
    #include <shlobj.h>
-   #include <IPTypes.h>
+   #include <iptypes.h>
 #else
    // Unix
+   #include <limits.h>
    #include <sys/socket.h>
-   #include <sys/fcntl.h>
    #include <sys/utsname.h>
    #include <sys/stat.h>
    #if( defined( __linux__ ) || defined( __APPLE__ ) ) /* at least, maybe for others too */
@@ -73,26 +75,38 @@
          #include <net/if_dl.h>
          #include <libproc.h>
       #endif
+
+      #ifdef __linux__
+         #include <sys/auxv.h> // for getauxval
+      #endif
    #endif
    #include <netinet/in.h>
-   #include <unistd.h>
+   #include <fcntl.h>
+   #include <limits.h>
    #include <poll.h>
+   #include <unistd.h>
 #endif
 #include "dtoaLoc.h"
+
+#if __cplusplus >= 202002L
+#include <format>
+#endif
 
 using namespace rtl::sysutils_p3;
 using namespace rtl::p3platform;
 using namespace std::literals::string_literals;
+namespace fs = std::filesystem;
 using utils::ui32;
 
 // ==============================================================================================================
 // Implementation
 // ==============================================================================================================
-namespace rtl::p3utils
+namespace GDX_NS rtl::p3utils
 {
 
-#if defined( _WIN32 )
-#else
+constexpr p3pid_t pidSelf = INT_MAX;
+
+#if !defined( _WIN32 )
 static bool setEnvironmentVariableUnix( const std::string &name, const std::string &value = ""s )
 {
    if( name.empty() ) return false;
@@ -104,31 +118,119 @@ static bool setEnvironmentVariableUnix( const std::string &name, const std::stri
    }
    return !setenv( name.c_str(), value.c_str(), 1 );
 }
+
+[[maybe_unused]] static bool
+setEnvironmentVariableUnix(std::string_view name, std::string_view value = std::string_view(""))
+{
+   if( name.empty() ) return false;
+   const char *name_ = name.data();
+   if( value.empty() )
+   {
+      // delete name from env
+      unsetenv( name_ );
+      return true;
+   }
+   return !setenv(name_ , value.data(), 1 );
+}
 #endif
 
+// OH: not considered part of a state, it only make sense for executables
 static std::vector<std::string> paramstr;
 
-bool PrefixPath( const std::string &s )
+#if defined(__IN_CPPMEX__)
+bool PrefixPath( std::string_view s )
 {
-   if( s.empty() ) return true;
-
-   const auto prevPath = QueryEnvironmentVariable( "PATH" );
-   const std::string newPath = s + PathSep + prevPath;
-   return !AssignEnvironmentVariable( "PATH", newPath );
+   if( s.empty() )
+      return true;
+#if defined(_WIN32)
+   size_t slen = s.length();
+   DWORD plen = GetEnvironmentVariableA( "PATH", nullptr, 0 );
+   auto p = std::make_unique_for_overwrite<char[]>( slen + plen + 1 );
+   std::memcpy( p.get(), s.data(), slen );
+   if( plen > 0 )
+   {
+      p[slen] = PathSep;
+      auto tlen = GetEnvironmentVariableA( "PATH", p.get() + s.length() + 1, plen );
+      assert( tlen == plen - 1 );
+   }
+   else
+      p[slen] = '\0';
+   return SetEnvironmentVariableA( "PATH", p.get() );
+#else
+   const char *tptr = std::getenv("PATH");
+   const size_t plen = std::strlen(tptr), slen = s.length();
+   auto p = std::make_unique_for_overwrite<char[]>(slen+1+plen+1);
+   std::memcpy(p.get(), s.data(), slen);
+   if(plen > 0)
+   {
+      p[slen] = PathSep;
+      std::memcpy(p.get()+slen+1, tptr, plen);
+      p[slen+1+plen] = '\0';
+   }
+   else
+      p[slen] = '\0';
+   return setEnvironmentVariableUnix( std::string_view("PATH"), p.get() );
+#endif
 }
+
+bool PrefixPath( const fs::path &p )
+{
+   if( p.empty() )
+      return true;
+#if defined(_WIN32)
+
+   std::wstring s = p.native();
+   size_t slen = s.length();
+   DWORD plen = GetEnvironmentVariableW( L"PATH", nullptr, 0 );
+   auto v = std::make_unique_for_overwrite<wchar_t[]>( slen + plen + 1 );
+   std::memcpy( v.get(), s.data(), slen * sizeof(wchar_t) );
+   if( plen > 0 )
+   {
+      v[slen] = PathSep;
+      auto tlen = GetEnvironmentVariableW( L"PATH", v.get() + s.length() + 1, plen );
+      assert( tlen == plen - 1 );
+   }
+   else
+      v[slen] = '\0';
+   return SetEnvironmentVariableW( L"PATH", v.get() );
+#else
+   const char *tptr = std::getenv("PATH");
+   const char *s = p.c_str();
+   const size_t plen = std::strlen(tptr), slen = std::strlen(s);
+   auto v = std::make_unique_for_overwrite<char[]>(slen+1+plen+1);
+   std::memcpy(v.get(), s, slen);
+   if(plen > 0)
+   {
+      v[slen] = PathSep;
+      std::memcpy(v.get()+slen+1, tptr, plen);
+      v[slen+1+plen] = '\0';
+   }
+   else
+      v[slen] = '\0';
+   return setEnvironmentVariableUnix( std::string_view("PATH"), v.get() );
+#endif
+}
+#endif
 
 bool P3SetEnv( const std::string &name, const std::string &val )
 {
-#if defined( _WIN32 ) || defined( _WIN64 )
+#if defined( _WIN32 )
    return SetEnvironmentVariableA( name.c_str(), val.c_str() );
 #else
    return setEnvironmentVariableUnix( name, val );
 #endif
 }
 
+#ifdef _WIN32
+bool P3SetEnv( const std::wstring &name, const fs::path &p )
+{
+   return SetEnvironmentVariableW( name.c_str(), p.native().c_str() );
+}
+#endif
+
 void P3UnSetEnv( const std::string &name )
 {
-#if defined( _WIN32 ) || defined( _WIN64 )
+#if defined( _WIN32 )
    SetEnvironmentVariableA( name.c_str(), nullptr );
 #else
    setEnvironmentVariableUnix( name );
@@ -137,7 +239,11 @@ void P3UnSetEnv( const std::string &name )
 
 bool P3IsSetEnv( const std::string &name )
 {
+#if defined(_WIN32)
+   return GetEnvironmentVariableA( name.c_str(), NULL, 0 );
+#else
    return std::getenv( name.c_str() ) != nullptr;
+#endif
 }
 
 bool P3SetEnvPC( const std::string &name, const char *val )
@@ -217,6 +323,65 @@ bool p3GetMemoryInfo( uint64_t &rss, uint64_t &vss )
 #endif
 }
 
+bool p3GetMemoryInfoEx( p3pid_t pid, uint64_t &rss, uint64_t &vss )
+{
+   // TODO: do the reverse -> p3GetMemoryInfo calls p3GetMemoryInfoEx;
+   if (pid == pidSelf) {
+      return p3GetMemoryInfo(rss, vss);
+   }
+
+#if defined( _WIN32 )
+   PROCESS_MEMORY_COUNTERS info;
+   HANDLE h = OpenProcess (PROCESS_ALL_ACCESS, FALSE, pid);
+   if (!h) { return false; }
+
+   if (!GetProcessMemoryInfo( h, &info, sizeof( info ) )) {
+      CloseHandle(h);
+      return false; /* failure */
+   }
+
+   rss = static_cast<int64_t>( info.WorkingSetSize );
+   vss = static_cast<int64_t>( info.PagefileUsage );
+
+   CloseHandle(h);
+
+   return true; /* success */
+
+#elif defined( __linux )
+
+   size_t sz;
+   char buf[32];
+   snprintf(buf, sizeof(buf), "/proc/%d/statm", pid);
+   FILE *fp = std::fopen( buf, "r" );
+   if( !fp )
+      return false; /* failure */
+   /* first two are VmSize, VmRSS */
+   unsigned long urss, uvss;
+   const int n = fscanf( fp, "%lu %lu", &uvss, &urss );
+   std::fclose( fp );
+   if( 2 != n )
+      return false; /* failure */
+   sz = sysconf( _SC_PAGESIZE );
+   rss = sz * urss;
+   vss = sz * uvss;
+   return true; /* success */
+
+#elif defined( __APPLE__ )
+
+   int ret;
+   struct proc_taskinfo procTaskInfo;
+   ret = proc_pidinfo( pid, PROC_PIDTASKINFO, 0,
+                       (void *) &procTaskInfo, sizeof( procTaskInfo ) );
+   if( ret < (int) sizeof( procTaskInfo ) )
+      return false; /* failure */
+   rss = (int64_t) procTaskInfo.pti_resident_size;
+   vss = (int64_t) procTaskInfo.pti_virtual_size;
+   return true; /* success */
+#else
+   throw std::runtime_error( "Unknown platform for getMemoryInfoEx!" );
+   return false; /* fail */
+#endif
+}
 void p3SetConsoleTitle( const std::string &s )
 {
 #if defined( _WIN32 )
@@ -387,7 +552,7 @@ int p3FileOpen( const std::string &fName, Tp3FileOpenAction mode, Tp3FileHandle 
    }
    else
    {
-      hFile = CreateFileA ((fName.length() > MAX_PATH ? tryFixingLongPath( fName ) : fName).c_str(), accessMode[lowMode], shareMode[lowMode], nullptr,
+      hFile = CreateFileA ((isLongPath(fName) ? tryFixingLongPath( fName ) : fName).c_str(), accessMode[lowMode], shareMode[lowMode], nullptr,
                        createHow[lowMode], FILE_ATTRIBUTE_NORMAL, nullptr);
    }
    if( INVALID_HANDLE_VALUE == hFile )
@@ -640,8 +805,8 @@ int p3FileGetPointer(Tp3FileHandle h, int64_t &filePointer)
       return res;
    }
 #else
-   off_t newPos = lseek( h, 0, SEEK_CUR );
-   if( (off_t) -1 == newPos )
+   const off_t newPos = lseek( h, 0, SEEK_CUR );
+   if( static_cast<off_t>( -1 ) == newPos )
       return errno;
    filePointer = newPos;
 #endif
@@ -649,11 +814,11 @@ int p3FileGetPointer(Tp3FileHandle h, int64_t &filePointer)
 }
 
 /*
-     * Get a list(of sorts) of directories to search for config / data / doc / etc files
-     * by convention, the first element in this list is the writableLocation
-     * return true if we follow this convention(i.e.p3WritableLocation succeeds), false otherwise
-     *  But even on false, locCountand locNames are valid
-     */
+ * Get a list(of sorts) of directories to search for config / data / doc / etc files
+ * by convention, the first element in this list is the writableLocation
+ * return true if we follow this convention(i.e.p3WritableLocation succeeds), false otherwise
+ *  But even on false, locCountand locNames are valid
+ */
 bool p3StandardLocations( Tp3Location locType, const std::string &appName, TLocNames &locNames, int &eCount )
 {
    eCount = 0;
@@ -665,8 +830,8 @@ bool p3StandardLocations( Tp3Location locType, const std::string &appName, TLocN
 
    if( OSFileType() == OSFileWIN )
    {
-      const bool isConfigLoc { utils::in( locType, p3Config, p3AppConfig ) };
-      if( isConfigLoc || isDataLoc )
+      if( const bool isConfigLoc { utils::in( locType, p3Config, p3AppConfig ) };
+         isConfigLoc || isDataLoc )
       {
          const std::string suffix = appName.empty() ? ""s : PathDelim + appName;
          locNames.emplace_back( "C:\\ProgramData" + suffix );
@@ -686,7 +851,7 @@ bool p3StandardLocations( Tp3Location locType, const std::string &appName, TLocN
          if( !appName.empty() ) locNames.emplace_back( locNames.back() + PathDelim + appName );
       }
    }
-   else if( utils::in(OSPlatform(), p3platform::OSDarwin_x64, p3platform::OSDarwin_arm64) )
+   else if( utils::in(OSPlatform(), OSDarwin_x64, OSDarwin_arm64) )
    {
       if( isDataLoc )
       {
@@ -698,18 +863,18 @@ bool p3StandardLocations( Tp3Location locType, const std::string &appName, TLocN
             eCount++;
             return res;
          }
-         std::string execPath { ExcludeTrailingPathDelimiter( ExtractFilePath( execName ) ) };
-         if( LastDelimiter( "/", execPath ) >= 2 ) locNames.emplace_back( ExtractFilePath( execPath ) + "Resources"s );
+         if( const std::string execPath { ExcludeTrailingPathDelimiter( ExtractFilePath( execName ) ) };
+            LastDelimiter( "/", execPath ) >= 1 ) locNames.emplace_back( ExtractFilePath( execPath ) + "Resources"s );
          else
             eCount++;
       }
    }
    else
    {// neither Windows nor Mac, right now this must be Linux
-      /*bool  isPlainConfigLoc { p3Config == locType }; */
-      bool isAppConfigLoc { p3AppConfig == locType };
+      // bool  isPlainConfigLoc { p3Config == locType };
+      const bool isAppConfigLoc { p3AppConfig == locType };
       std::array<char, 256> buf {};
-      const auto bufLen = P3GetEnvPC( isDataLoc ? "XDG_DATA_DIRS" : "XDG_CONFIG_DIRS"s, buf.data(), static_cast<uint32_t>(buf.size()) );
+      const auto bufLen = P3GetEnvPC( isDataLoc ? "XDG_DATA_DIRS"s : "XDG_CONFIG_DIRS"s, buf.data(), static_cast<uint32_t>(buf.size()) );
       if( bufLen >= buf.size() )
       {// too much to handle
          eCount++;
@@ -717,25 +882,26 @@ bool p3StandardLocations( Tp3Location locType, const std::string &appName, TLocN
       }
       if( bufLen > 0 )
       {// we got something
-         std::string msg = ( isAppConfigLoc || isDataLoc ) && !appName.empty() ? "/"s + appName : ""s;
-         int dPos {}, k {};
+         const std::string msg = ( isAppConfigLoc || isDataLoc ) && !appName.empty() ? "/"s + appName : ""s;
+         int end {}, start {};
          do {
-            while( buf[dPos] != '\0' && buf[dPos] != ':' ) dPos++;
-            const int n = dPos - k;
-            if( n > 0 )
+            while( buf[end] != '\0' && buf[end] != ':' ) end++;
+            buf[end] = '\0';
+            if( const int n = end - start; n > 0 )
             {
-               if( locNames.size() >= NLocNames ) eCount++;
+               if( locNames.size() >= NLocNames )
+                  eCount++;
                else
-                  locNames.emplace_back( ""s + buf.data() + msg );
+                  locNames.emplace_back( ""s + &buf[start] + msg );
             }
-            dPos++;
-            k = dPos;
-         } while( k <= static_cast<int>( bufLen ) );
+            end++;
+            start = end;
+         } while( start <= static_cast<int>( bufLen ) );
       }
       else
       {
-         std::string prefix { "/etc/xdg" },
-                 suffix { ( ( isDataLoc || isAppConfigLoc ) && !appName.empty() ? "/"s + appName : ""s ) };
+         std::string prefix { "/etc/xdg" };
+         const std::string suffix { ( isDataLoc || isAppConfigLoc ) && !appName.empty() ? "/"s + appName : ""s };
          if( isDataLoc )
          {
             prefix = "/usr/local/share";
@@ -767,9 +933,9 @@ static bool homePlus( const std::string &dd1, const std::string &dd2, std::strin
 bool p3WritableLocation( Tp3Location locType, const std::string &appName, std::string &locName ) { return false; }
 #else
 /*
-     * Get the name of the directory to write config/data/doc/etc files to
-     * return true on success (i.e. we can construct the name), false on failure
-     */
+ * Get the name of the directory to write config/data/doc/etc files to
+ * return true on success (i.e. we can construct the name), false on failure
+ */
 bool p3WritableLocation( Tp3Location locType, const std::string &appName, std::string &locName )
 {
 #ifdef _WIN32
@@ -844,9 +1010,354 @@ bool p3WritableLocation( Tp3Location locType, const std::string &appName, std::s
    }
 #endif
 }
+#endif // MINGW
+
+#if __cplusplus >= 202002L
+static int GetExecNameUnix( fs::path &execPath, std::string &msg )
+{
+   int rc { 8 };
+#if defined( __APPLE__ )
+   char execBuf[PROC_PIDPATHINFO_MAXSIZE];
+   auto pid = getpid();
+   int k = proc_pidpath( pid, execBuf, sizeof( execBuf ) );
+   if( k <= 0 )
+   {
+      msg = std::format("proc_pidpath(pid={},...) failed: {}", pid, SysErrorMessage(errno));
+      execPath.clear();
+      rc = 4;
+   }
+   else
+   {
+      execPath.assign( execBuf );
+      rc = 0;
+   }
+
+
+#elif defined( __linux__ )
+   char execBuf[PATH_MAX];
+   auto ssz = readlink( "/proc/self/exe", execBuf, sizeof( execBuf ));
+   if( ssz < 0 || (size_t)ssz >= sizeof( execBuf ))
+   {
+      /* Some container do not mount /proc */
+      const char *exec_path = (const char *)getauxval(AT_EXECFN);
+      int errno_ = errno;
+      if (exec_path) {
+         // this form of realpath is more robust, see man realpath
+         char *execName = realpath(exec_path, nullptr);
+
+         if (execName) {
+            execPath.assign( execName );
+            free(execName);
+            rc = 0;
+         } else {
+            msg = "both readlink(/proc/self/exe,...) and getauxval failed";
+            if (ssz == -1) {
+               msg += ": " + SysErrorMessage(errno_);
+            }
+            rc = 4;
+         }
+
+      }
+      else
+      {
+         msg = std::format("readlink(/proc/self/exe,...) failed: {}", SysErrorMessage(errno));
+         execPath.clear();
+         rc = 4;
+      }
+   }
+   else
+   {
+      // man 3p readlink has
+      // "Conforming applications should not assume that the returned contents of the
+      // symbolic link are null-terminated."
+      execBuf[ssz] = '\0';
+      execPath.assign( execBuf );
+      rc = 0;
+   }
+#else
+   execPath.clear();
+   msg.assign("not implemented for this platform");
+#endif
+   return rc;
+}
+
+int p3GetExecName( fs::path &execNameFull, std::string &msg )
+{
+   execNameFull.clear();
+#if defined( _WIN32 )
+   WCHAR pathText[MAX_PATH];
+
+   DWORD res = GetModuleFileNameW( nullptr, pathText, MAX_PATH );
+
+   if (!res) {
+      msg = "GetModuleFileNameW call failed: " + std::to_string(GetLastError());
+      return 3;
+   }
+
+   if (res >= MAX_PATH) {
+      std::wstring pathTestLong { 32768 };
+      res = GetModuleFileNameW( nullptr, pathTestLong.data(), (DWORD)pathTestLong.size());
+
+      if (res >= 32768) {
+          msg = "GetModuleFileNameW call failed with buffer size " + std::to_string(pathTestLong.size());
+         return 3;
+      }
+
+      execNameFull.assign(pathTestLong);
+   } else {
+      execNameFull.assign(pathText);
+   }
+
+   msg.clear();
+   return 0;
+#else
+   msg = "P3: not yet implemented";
+   return GetExecNameUnix( execNameFull, msg );
+#endif
+}
+
+#ifdef __linux__
+#include <pwd.h>
+#include <unistd.h>
+
+/**
+ * @brief Get a subdirectory in a $HOME-like directory
+ *
+ * The "home" dir is obtained as follows
+ * 1. If $HOME is defined, use it
+ * 2. Else if a home is available via /etc/passwd, use it
+ *
+ * If any of the above succeeds, return homedir / subdir / appName
+ *
+ * 3. Else return "/var/tmp/appName-uid/subdir"
+ *
+ * @param subdir    the subdir
+ * @param appName   the application name
+ *
+ * @return          the desired subdirectory
+ */
+static fs::path getHomeLikeSubdir(const fs::path & subdir, std::u8string_view appName)
+{
+   std::u8string home = QueryEnvironmentVariable(u8"HOME");
+   if (!home.empty()) {
+      return fs::path(home) / subdir;
+   }
+
+   struct passwd *pw = getpwuid(getuid());
+
+   // Check if entry exists and pw_dir is non-empty
+   if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
+      return fs::path(pw->pw_dir) / subdir;
+   }
+
+   fs::path appDir { std::u8string(appName) + std::u8string(u8"-") + to_u8string(std::to_string(getuid()).c_str()) };
+   return fs::path("/var/tmp") / appDir / subdir;
+}
+
 #endif
 
-const std::string zeros {std::string( 54, '0' )};
+/*
+ * Get the name of the directory to write config/data/doc/etc files to
+ * return true on success (i.e. we can construct the name), false on failure
+ */
+bool p3WritableLocation( Tp3Location locType, const std::u8string &appName, fs::path &locName )
+{
+#ifdef _WIN32
+   locName.clear();
+
+   KNOWNFOLDERID folderId;
+   if( utils::in( locType, p3Config, p3AppConfig, p3Data, p3AppLocalData ) )
+      folderId = FOLDERID_LocalAppData; // %LOCALAPPDATA%
+   else if( locType == p3AppData )
+      folderId = FOLDERID_RoamingAppData; // %APPDATA%
+   else if( locType == p3Documents )
+      folderId = FOLDERID_Documents;
+   else
+      throw std::runtime_error("Unhandled location value " + std::to_string(locType));
+
+   PWCHAR wideBuf;
+   if( SHGetKnownFolderPath( folderId, 0, nullptr, &wideBuf ) == S_OK )
+   {
+      locName = fs::path(wideBuf);
+
+   } // TODO: deal with failure
+   CoTaskMemFree(wideBuf);
+
+   // FIXME: cleanup the mess here: in gdlib::gamsdirs::GMSDataLocations we do this
+   // for p3Documents
+   if( !locName.empty() && !appName.empty() && utils::in( locType, p3Config, p3AppConfig, p3Data, p3AppData, p3AppLocalData ) )
+      locName /= appName;
+   return !locName.empty();
+
+#elif defined( __APPLE__ )
+
+      std::u8string home = QueryEnvironmentVariable(u8"HOME");
+      if (home.empty()) { return false; }
+      locName = fs::path(home);
+
+      if( p3Config == locType ) {
+         locName /= "Library/Preferences";
+      } else if( p3AppConfig == locType ) {
+         locName /= "Library/Preferences";
+         locName /= appName;
+      } else if( utils::in( locType, p3Data, p3AppData, p3AppLocalData ) ) {
+         locName /= "Library/Application Support";
+         locName /= appName;
+      } else if( p3Documents == locType ) {
+         locName /= "Documents";
+      } else {
+         return false;
+      }
+
+      return true;
+
+#else
+
+      // everything neither Windows nor macOS: only Linux in July 2022
+      // see https://specifications.freedesktop.org/basedir/latest/
+      if( p3Config == locType || p3AppConfig == locType ) {
+
+         std::u8string cfgHomeDir = QueryEnvironmentVariable(u8"XDG_CONFIG_HOME");
+         if (!cfgHomeDir.empty()) {
+            locName = std::move(fs::path(cfgHomeDir));
+         }  else {
+            locName = getHomeLikeSubdir(".config", appName);
+         // FIXME: remove this
+         if (p3AppConfig == locType) { locName /= appName; }
+         }
+
+         // FIXME: current GAMS behavior is a BUG
+         if (false && p3AppConfig == locType) {
+            locName /= appName;
+         }
+
+      }
+      else if( utils::in( locType, p3Data, p3AppData, p3AppLocalData ) )
+      {
+         std::u8string dataHomeDir = QueryEnvironmentVariable( u8"XDG_DATA_HOME" );
+         if (!dataHomeDir.empty()) {
+            locName = fs::path(dataHomeDir);
+            // FIXME: current GAMS behavior is a BUG
+            if (false && locType != p3Data) locName /= appName;
+         } else {
+            locName = getHomeLikeSubdir(fs::path(".local/share") / appName, appName);
+         }
+      }
+      else if( locType == p3Documents )
+      {
+         locName = getHomeLikeSubdir(fs::path("Documents") / appName, appName);
+      }
+      else
+         return false;
+
+   return true;
+#endif
+}
+
+/*
+ * Get a list(of sorts) of directories to search for config / data / doc / etc files
+ * by convention, the first element in this list is the writableLocation
+ * return true if we follow this convention(i.e.p3WritableLocation succeeds), false otherwise
+ *  But even on false, locCount and locNames are valid
+ */
+bool p3StandardLocations(Tp3Location locType, const std::u8string &appName,
+                         locpath_t &locNames, int &eCount )
+{
+   eCount = 0;
+   locNames = { u8"" };// { GetCurrentDir() };
+   const bool res = p3WritableLocation( locType, appName, locNames.front() );
+   if( p3Documents == locType ) return res;
+
+   const bool isDataLoc { utils::in( locType, p3Data, p3AppData, p3AppLocalData ) };
+
+#ifdef _WIN32
+   if( const bool isConfigLoc { utils::in( locType, p3Config, p3AppConfig ) };
+      isConfigLoc || isDataLoc ) {
+      PWSTR pathText = nullptr;
+      if (SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &pathText) == S_OK) {
+         locNames.emplace_back(fs::path(pathText) / appName);
+      }
+      CoTaskMemFree(pathText);
+   }
+
+   if( isDataLoc ) {
+      fs::path execName {};
+      if( std::string msg; p3GetExecName( execName, msg ) ) {
+         eCount++;
+         return res;
+      }
+
+      fs::path execParentPath { execName.parent_path() };
+      locNames.emplace_back( execParentPath );
+      execParentPath /= "data";
+      locNames.emplace_back( execParentPath );
+      if( !appName.empty() ) locNames.emplace_back( execParentPath / appName );
+   }
+#elif defined(__APPLE__)
+   // NOTE: in p3pas, this was condtional on isDataLoc; however this makes no sense
+
+   locNames.emplace_back( fs::path("/Library/Application Support") / appName );
+
+   fs::path execName {};
+   if( std::string msg; p3GetExecName( execName, msg ) ) {
+      eCount++;
+      return res;
+   }
+
+   fs::path execParentPath { execName.parent_path() };
+   if( LastDelimiter( "/", execParentPath.string() ) >= 1 )
+      locNames.emplace_back( execParentPath.parent_path() / "Resources" );
+   else
+      eCount++;
+#else
+   // neither Windows nor Mac, right now this must be Linux
+   // see https://specifications.freedesktop.org/basedir/latest/
+   // bool  isPlainConfigLoc { p3Config == locType };
+   const bool isAppConfigLoc { p3AppConfig == locType };
+   std::u8string xdgDir = isDataLoc ? QueryEnvironmentVariable(u8"XDG_DATA_DIRS") :
+                                      QueryEnvironmentVariable(u8"XDG_CONFIG_DIRS");
+
+   if( !xdgDir.empty() ) {
+
+      const std::u8string empty{}, &suffix { ( isDataLoc || isAppConfigLoc ) ? appName : empty };
+      size_t start = 0, pos, sz = xdgDir.size();
+      do {
+         pos = xdgDir.find_first_of(':', start);
+         if (pos > start) {
+            locNames.emplace_back( fs::path(xdgDir.substr(start, pos-start)) / suffix );
+         }
+         start = pos+1;
+      } while (pos < sz-1);
+
+   }
+   else
+   {
+      const std::u8string empty{}, &suffix { ( isDataLoc || isAppConfigLoc ) ? appName : empty };
+      if( isDataLoc )
+      {
+         locNames.emplace_back( fs::path("/usr/local/share") / suffix );
+         locNames.emplace_back( fs::path("/usr/share") / suffix);
+      } else {
+         locNames.emplace_back( fs::path("/etc/xdg") / suffix );
+         locNames.emplace_back( fs::path("/etc") / suffix ); // OH addition
+      }
+   }
+#endif
+   return res;
+}
+
+#endif
+
+
+static inline std::string repeatChar( const int n, const char c )
+{
+   return n > 0 ? std::string( n, c ) : ""s;
+}
+
+static inline std::string zeros( const int n )
+{
+   return repeatChar( n, '0' );
+}
 
 int p3Chmod( const std::string &path, int mode )
 {
@@ -946,8 +1457,8 @@ std::string p3FloatToEfmt( double x, int width, int decimals )
    {
       int eDigCnt = 2;
       int nDigits = std::min<int>( decimals + 1, width - 4 - eDigCnt );
-      nDigits = std::min<int>( nDigits, 16 );
-      return nDigits <= 0 ? " 0E+00"s : " 0."s + zeros.substr( 0, nDigits - 1 ) + "E+00"s;
+      nDigits = std::min<int>( nDigits, 16 ); // no point to ask for or show more than 16 total for zero
+      return nDigits <= 0 ? " 0E+00"s : " 0."s + zeros(nDigits - 1 ) + "E+00"s; // shave off the decimal point
    }
 
    std::string res;
@@ -967,41 +1478,44 @@ std::string p3FloatToEfmt( double x, int width, int decimals )
    int   eDigCntGuess { getCntGuess( xAbs ) },
          eDigCnt { eDigCntGuess },
          nDigits { std::min<int>( decimals + 1, width - 4 - eDigCnt ) };
-   nDigits = std::min<int>( nDigits, 17 );
+   nDigits = std::min<int>( nDigits, 17 ); // no point to ask for or show more than 17 total
    int digMode { 4 };
    std::string digits;
    int decPos, minusCnt;
    [[maybe_unused]] bool brc { p3GetDecDigits( xAbs, digMode, nDigits, digits, decPos, minusCnt ) };
    assert( brc && "getDecDigits failed" );
    assert( decPos < 999 && "Input xAbs is not finite" );
-   int digCnt { (int)digits.length() };
-   int eVal { decPos - 1 };
+   int digCnt { static_cast<int>( digits.length() ) };
+   int eVal { decPos - 1 }; // [ /-]d.DDDDDE+{eVal}
    bool eValNeg { eVal < 0 };
    if( eValNeg )
       eVal = -eVal;
    std::string eDigits;
    eDigCnt = digitRep( eVal, 2, eDigits );
-   if (eDigCntGuess != eDigCnt)
+   if (eDigCntGuess != eDigCnt) // this is quite unusual
    {
       if (!eValNeg)
       {
+         // we only get here going from 9.99999e99 -> 1.e100 or similar
          assert( eDigCntGuess + 1 == eDigCnt && "Bogus eDigCnt in positive eVal case" );
          nDigits = std::min<int>( decimals + 1, width - 4 - eDigCnt );
       }
       else
       {
+         // we only get here going from 9.99999e-100 -> 1.e-99 or similar
          assert( eDigCntGuess - 1 == eDigCnt && "Bogus eDigCnt in positive eVal case" );
          nDigits = std::min<int>( decimals + 1, width - 4 - eDigCnt );
       }
    }
 
+   // if we asked for 17 but did not get that many, pretend we asked for 16
    if( 17 == nDigits && digCnt < nDigits )
       nDigits--;
-   if (nDigits > 0)
+   if (nDigits > 0) // good case: we know we will not exceed specified width
    {
       res += digits[0] + "."s + digits.substr( 1, digCnt );
-      if( nDigits > digCnt )
-         res += zeros.substr( 0, nDigits - digCnt );
+      if( nDigits > digCnt ) // zero-fill needed
+         res += zeros(nDigits - digCnt );
       res += "E"s + ( eValNeg ? '-' : '+' ) + eDigits;
       result = res;
    }
@@ -1097,7 +1611,7 @@ std::string ParamStrZero()
    return paramstr.front();
 }
 
-std::string ParamStr( int index )
+std::string ParamStr( const int index )
 {
    return index >= 0 && index < static_cast<int>( paramstr.size() ) ? paramstr[index] : ""s;
 }
@@ -1184,6 +1698,308 @@ bool PrefixEnv( const std::string &dir, const std::string &evName )
 #endif
 }
 
+#if !defined(_WIN32)
+char *safecat( char *dst, size_t dstSiz, char *end, const char *src );
+
+// Steve's routines from 23 Aug 2001 (3nd version)
+
+/* Like strcat(dst, src), but with a size guard and some efficiency.
+ * It returns a pointer to the terminating null byte, like stpcpy
+ * Assumptions:
+ *   dst & src are non-NULL and non-overlapping
+ *   dstSiz is the allocated size of dst
+ *   to get a nice result, end should point to the terminating null byte
+ *     of dst, or at least somewhere in dst.
+ * If strlen(dst) + strlen(src) + 1 > dstSiz, returns NULL
+ * otherwise, does strcat(dst,src) and returns (dst + strlen(dst))
+ */
+char *safecat( char *dst, size_t dstSiz, char *end, const char *src )
+{
+   size_t srcLen;
+   size_t used;
+
+   if ((NULL == end) || (dst > end) || (end >= dst+dstSiz))
+      return NULL;
+   if (*end) {                   /* push to the end */
+      used = end - dst;
+      end += strnlen (end, dstSiz - used);
+      if (end >= dst+dstSiz)      /* end is already too long */
+         return NULL;
+   }
+   used = end - dst;
+   srcLen = strnlen (src, dstSiz - used);
+   if (used + srcLen >= dstSiz)     /* result too long */
+      return NULL;
+   return stpcpy (end, src);
+}
+
+/* followSymLink ():
+ * replace input pathname (potentially a symlink) with actual file
+ * returns:
+ *   0      on success, or if input not a symlink
+ *   errno  on failure
+ */
+static int
+followSymLink (char absPathName[], const size_t absPathSiz)
+{
+   char newPathName[PATH_MAX];
+   const auto rc = readlink (absPathName, newPathName, sizeof(newPathName));
+   if (-1 == rc) {
+      if (EINVAL == errno) {
+         return 0;                 /* not a symlink */
+      }
+      return errno;
+   }
+   if( rc >= (long int)sizeof( newPathName ) )
+   { /* result buffer too small */
+      return ENAMETOOLONG;
+   }
+   /* the symlink was successfully followed,
+    * and the contents fit into newPathName
+    */
+   newPathName[rc] = '\0';
+   char *end = absPathName;            /* prep to overwrite completely */
+   if ('/' == newPathName[0]) {  /* just copy it */
+      /* end is already set for this */
+   }
+   else {                        /* if there is a slash, append after it */
+      char *p = strrchr(absPathName, '/');
+      if (p) {
+         end = p + 1;
+      }
+   }
+   *end = '\0';
+   end = safecat (absPathName, absPathSiz, end, newPathName);
+   if ( !end)
+      return ENAMETOOLONG;
+
+   return 0;
+} /* followSymLink */
+
+/* getAbsPath ():
+ * given a path to a file, returns the absolute path
+ * it assumes the file has a slash in it, i.e. its position
+ * relative to the current dir is specified explicitly
+ * return:
+ *    absPath   on success
+ *    NULL      on failure
+ */
+static char *
+getAbsPath (char absPath[], const size_t absPathSiz, const char *fname)
+{
+   char *end {};
+
+   if ('/' == fname[0]) { /* easiest case: path name absolute already */
+      *absPath = '\0';
+      end = safecat (absPath, absPathSiz, absPath, fname);
+   }
+   else {                        /* argument is relative to cwd */
+      if (!getcwd(absPath, absPathSiz)) {
+         *absPath = '\0';
+         return nullptr;
+      }
+      if ('.' == fname[0] && '/' == fname[1]) {
+         end = safecat (absPath, absPathSiz, absPath, fname+1);
+      }
+      else {
+         end = safecat (absPath, absPathSiz, absPath, "/");
+         end = safecat (absPath, absPathSiz, end, fname);
+      }
+   } /* relative path */
+
+   return !end ? nullptr : absPath;
+} /* getAbsPath */
+
+/* unixGetModuleFileName (prog, buf, bufSiz)
+ * get the full path of the executable being run
+ * in the process, follow symlinks and make relative paths absolute
+ * returns:
+ *    0 on failure
+ *    strlen of the returned buf on success (result < bufSiz)
+ *    bufSiz never returned
+ *    result > bufSiz to signal result buffer too small:
+ *       call again with bufSiz >= result
+ */
+static int unixGetModuleFileName(const char *prog, char *buf, const int bufSiz)
+{
+  char pathName[PATH_MAX];      /* may be relative or not */
+  char absPathName[PATH_MAX];
+  char *path = nullptr;
+  char *savePtr;
+  char *p, *end = nullptr, *dir;
+  int rc;
+  size_t len;
+  struct stat statBuf;
+
+  *buf = '\0';
+  *pathName = '\0';
+  /* easy case: absolute path name */
+  if ('/' == prog[0]) {
+    end = safecat (pathName, sizeof(pathName), pathName, prog);
+    if (!end)
+      return 0;
+    rc = followSymLink (pathName, sizeof(pathName));
+    if (rc)
+      return 0;
+    if ('/' == *pathName) {     /* path already absolute */
+      p = pathName;
+    }
+    else {
+      p = getAbsPath (absPathName, sizeof(absPathName), pathName);
+      if ( !p)
+        return 0;
+    }
+    len = strlen (p);
+    if (len < (size_t)bufSiz) {
+      (void) memcpy (buf, p, len);
+      buf[len] = '\0';
+    }
+    else {                      /* result too long */
+      len++;                    /* add one for the terminating null */
+    }
+    return (int) len;
+  }
+
+  /* relative path name */
+  if (strchr(prog, '/')) {
+    if (!getcwd (pathName, sizeof(pathName))) {
+      return 0;
+    }
+    if ('.' == prog[0] && '/' == prog[1]) {
+      end = safecat (pathName, sizeof(pathName), pathName, prog+1);
+    }
+    else {
+      end = safecat (pathName, sizeof(pathName), pathName, "/");
+      end = safecat (pathName, sizeof(pathName), end, prog);
+    }
+    rc = followSymLink (pathName, sizeof(pathName));
+    if (rc)
+      return 0;
+    if ('/' == *pathName) {     /* path already absolute */
+      p = pathName;
+    }
+    else {
+      p = getAbsPath (absPathName, sizeof(absPathName), pathName);
+      if (NULL == p)
+        return 0;
+    }
+    len = strlen (p);
+    if (len < (size_t)bufSiz) {
+      (void) memcpy (buf, p, len);
+      buf[len] = '\0';
+    }
+    else {                      /* result too long */
+      len++;                    /* add one for the terminating null */
+    }
+    return (int) len;
+  } /* relative path */
+
+  /* Third Step: Scan the path */
+  p = getenv ("PATH");
+  if (p) {
+    len = strlen (p);
+    path = static_cast<char *>( malloc( len + 1 ) );
+    if (!path) {
+      errno = ENOMEM;
+      return 0;
+    }
+    strcpy (path, p);
+    errno = 0;
+    for (dir = strtok_r (path, ":", &savePtr);
+         dir;
+         dir = strtok_r (nullptr, ":", &savePtr)) {
+      if ('.' == dir[0] && '\0' == dir[1]) {
+        if (! getcwd (pathName, sizeof(pathName))) {
+          goto wefail;
+        }
+        end = pathName + strlen(pathName);
+      }
+      else {
+        *pathName = '\0';
+        end = safecat (pathName, sizeof(pathName), pathName, dir);
+        if (!end)
+          goto wefail;
+      }
+      if (*(end-1) != '/') { /* SSN added; this helps */
+        end = safecat (pathName, sizeof(pathName), end, "/");
+      }
+      end = safecat (pathName, sizeof(pathName), end, prog);
+      if (!end)
+        goto wefail;
+      if (!access (pathName, X_OK)
+          && (0 == stat(pathName, &statBuf))
+          && ! S_ISDIR(statBuf.st_mode)
+          ) {
+        rc = followSymLink (pathName, sizeof(pathName));
+        if (rc)
+          goto wefail;
+        if ('/' == *pathName) { /* path already absolute */
+          p = pathName;
+        }
+        else {
+          p = getAbsPath (absPathName, sizeof(absPathName), pathName);
+          if (!p)
+            goto wefail;
+        }
+        len = strlen (p);
+        if (len < (size_t)bufSiz) {
+          (void) memcpy (buf, p, len);
+          buf[len] = '\0';
+        }
+        else {                      /* result too long */
+          len++;                    /* add one for the terminating null */
+        }
+        free (path);
+        return (int) len;
+      } /* if found in path */
+    } /* end loop over dirs in path */
+    free (path);
+    errno = ENOENT;
+    return 0;
+  } /* if (path is set) */
+
+ wefail:
+  if (path) {
+    free (path);
+  }
+  errno = ENOENT;
+  return 0;
+} /* unixGetModuleFileName */
+
+static char *wrapUnixGMFN (const char *argv0, char *res, const int maxLen)
+{
+   constexpr bool Test_GMFN {};
+   char appDir[PATH_MAX];
+
+   if (Test_GMFN)
+      printf ("argv[0] is '%s'\n", argv0);
+   int len = unixGetModuleFileName( argv0, appDir, sizeof( appDir ) );
+   if (0 == len) {
+      if (Test_GMFN)
+         printf ("wrapUnixGMFN(): Unable to get module file name of '%s'\n", argv0);
+   }
+   else if (len <= maxLen) {
+      if (Test_GMFN)
+         printf ("Module file name is '%s'\n", appDir);
+   }
+   else {
+      if (Test_GMFN) {
+         printf ("*** Error: Module file name too long:"
+                 " %d chars exceeds allowed length of %d\n", len, maxLen);
+         printf ("*** Module file name is '%s'\n", appDir);
+      }
+      len = 0;  /* just kill it, can't use it anyway */
+   }
+
+   /* Copy string of length len back to Pascal */
+   for ( int i = 1;  i <= len;  i++)
+      res[i] = appDir[i-1];
+   res[0] = static_cast<char>( len );
+
+   return res;
+}
+#endif
+
 void initParamStr( const int argc, const char **argv )
 {
    paramstr.resize( argc );
@@ -1193,12 +2009,53 @@ void initParamStr( const int argc, const char **argv )
       if( !i ) // absolute executable path
       {
 #if defined(_WIN32)
-         std::array<char, 261> buf {}; // length taken from Delphi's System.pas unit
-         const auto slen { GetModuleFileNameA( nullptr, buf.data(), 256 ) };
-         paramstr.front() = std::string { buf.data(), slen};
+         // length taken from Delphi's System.pas unit
+         std::array<WCHAR, MAX_PATH> bufW {}, shortNameW {};
+         std::array<char, MAX_PATH> bufA {};
+         auto r { GetModuleFileNameW( nullptr, bufW.data(), (DWORD)bufW.size() ) };
+         if(!r)
+         {
+            paramstr.front().clear();
+            continue;
+         }
+         if(r < 256 && allASCIIchars(bufW.data(), r))
+            cpW2A(bufA.data(), bufW.data(), r);
+         else
+         {
+            r = GetRobustShortPathW(bufW.data(), shortNameW.data(), 256);
+            if(!r)
+            {
+               paramstr.front().clear();
+               continue;
+            }
+            if(allANSIchars( shortNameW.data(), r ))
+            {
+               cpW2A(bufA.data(), shortNameW.data(), r);
+            }
+            else
+            {
+               // if we reach here all that is available is super-ANSI: return empty str
+               paramstr.front().clear();
+               continue;
+            }
+         }
+         paramstr.front() = std::string { bufA.data(), r };
 #else
-         if( std::string buf, msg; !xGetExecName( buf, msg ) )
-            paramstr.front() = buf;
+         std::string buf, msg;
+         utils::sstring fsbuf;
+         switch( [[maybe_unused]] int rc = xGetExecName( buf, msg ) )
+         {
+            case 0:
+               paramstr.front() = buf;
+               break;
+            case 1:
+               paramstr.front().clear();
+               continue;
+            default:
+               wrapUnixGMFN(argv[0], fsbuf.data(), fsbuf.size());
+               paramstr.front() = fsbuf.data();
+               break;
+         }
 #endif
       }
    }
@@ -1236,15 +2093,27 @@ int xGetExecName( std::string &execName, std::string &msg )
    else
       rc = 0;
 #elif defined( __linux )
+   static_assert(execBuf.size() >= PATH_MAX);
    std::array<char, 2048> tmpBuf {};
    auto ssz = readlink( "/proc/self/exe", execBuf.data(), sizeof( char ) * execBuf.size() );
    execName.assign( execBuf.data() );
    if( ssz < 0 )
    {
-      myStrError( errno, tmpBuf.data(), tmpBuf.size() * sizeof( char ) );
-      msg = "readlink(/proc/self/exe,...) failure: "s + std::string( tmpBuf.begin(), tmpBuf.end() );
-      execName.clear();
-      rc = 4;
+      /* Some container do not mount /proc */
+      const char *exec_path = (const char *)getauxval(AT_EXECFN);
+      if (exec_path && realpath(exec_path, execBuf.data())) {
+
+         execName.assign( execBuf.data() );
+         ssz = execBuf.size() - 1;
+         rc = 0;
+
+      } else {
+
+         myStrError( errno, tmpBuf.data(), tmpBuf.size() * sizeof( char ) );
+         msg = "readlink(/proc/self/exe,...) failure: "s + std::string( tmpBuf.begin(), tmpBuf.end() );
+         execName.clear();
+         return 4;
+      }
    }
    else
    {
@@ -1277,30 +2146,29 @@ int p3GetExecName( std::string &execName, std::string &msg )
    execName.clear();
 #if defined( _WIN32 )
    std::array<char, 256> buf {};
-   auto rc = GetModuleFileNameA( nullptr, buf.data(), (int) buf.size() );
+   const auto rc = GetModuleFileNameA( nullptr, buf.data(), static_cast<int>( buf.size() ) );
    if( !rc )
    {
       msg = "GetModuleFileNameA call failed";
       return 3;
    }
-   else if( rc >= 256 )
+   if( rc >= 256 )
    {
       buf.back() = '\0';
       execName.assign( buf.data() );
       msg = "result truncated to 255 chars";
       return 1;
    }
-   else
-   {
-      execName.assign( buf.data() );
-      msg.clear();
-      return 0;
-   }
+   execName.assign( buf.data() );
+   msg.clear();
+   return 0;
 #else
    msg = "P3: not yet implemented";
    return xGetExecName( execName, msg );
 #endif
 }
+
+
 
 #ifdef __IN_CPPMEX__
 // Get the first MAC address as a shortstring, in form aa:bb:1f:0a:b1:22
